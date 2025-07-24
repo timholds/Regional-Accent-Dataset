@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Regional Accent Detector</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🗣️ Regional Accent Detector</h1>
+            <p class="subtitle">Discover your American regional accent with AI</p>
+        </header>
+
+        <main>
+            <div class="record-section">
+                <div class="instructions">
+                    <p>Click the button and say:</p>
+                    <p class="prompt">"Hello, my name is [your name] and I'm from [your location]"</p>
+                </div>
+
+                <button id="recordButton" class="record-btn">
+                    <svg class="mic-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                        <line x1="12" y1="19" x2="12" y2="23"></line>
+                        <line x1="8" y1="23" x2="16" y2="23"></line>
+                    </svg>
+                    <span class="btn-text">Start Recording</span>
+                </button>
+
+                <div class="recording-indicator" style="display: none;">
+                    <div class="pulse"></div>
+                    <span>Recording...</span>
+                </div>
+
+                <div class="audio-preview" style="display: none;">
+                    <audio id="audioPlayback" controls></audio>
+                    <button id="analyzeButton" class="analyze-btn">Analyze My Accent</button>
+                </div>
+            </div>
+
+            <div id="results" class="results-section" style="display: none;">
+                <h2>Your Regional Accent</h2>
+                <div class="main-result">
+                    <div class="region-name"></div>
+                    <div class="confidence"></div>
+                </div>
+                
+                <div class="probability-chart">
+                    <h3>Regional Probabilities</h3>
+                    <div class="chart-container"></div>
+                </div>
+
+                <div class="share-section">
+                    <button id="shareButton" class="share-btn">Share My Results</button>
+                    <button id="tryAgainButton" class="try-again-btn">Try Again</button>
+                </div>
+            </div>
+
+            <div id="loading" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>Analyzing your accent...</p>
+            </div>
+        </main>
+
+        <footer>
+            <p>🤖 Powered by AI speech recognition</p>
+            <p class="disclaimer">For entertainment purposes. Results may vary based on recording quality.</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

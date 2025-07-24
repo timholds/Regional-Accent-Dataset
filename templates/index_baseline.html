@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Regional Accent Detector - BASELINE</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        .warning-banner {
+            background: #FFF3CD;
+            border: 2px solid #FFC107;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .warning-banner h3 {
+            color: #856404;
+            margin-bottom: 10px;
+        }
+        .warning-banner p {
+            color: #856404;
+            margin: 5px 0;
+            font-size: 0.9rem;
+        }
+        .baseline-badge {
+            display: inline-block;
+            background: #FFC107;
+            color: #000;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🗣️ Regional Accent Detector <span class="baseline-badge">BASELINE</span></h1>
+            <p class="subtitle">Testing with untrained AI model</p>
+        </header>
+
+        <main>
+            <div class="warning-banner">
+                <h3>⚠️ Baseline Model Warning</h3>
+                <p><strong>This is using an UNTRAINED model with random weights!</strong></p>
+                <p>Results will be essentially random - this is for testing purposes only.</p>
+                <p>Train the model first to get meaningful results.</p>
+            </div>
+
+            <div class="record-section">
+                <div class="instructions">
+                    <p>Click the button and say:</p>
+                    <p class="prompt">"Hello, my name is [your name] and I'm from [your location]"</p>
+                </div>
+
+                <button id="recordButton" class="record-btn">
+                    <svg class="mic-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                        <line x1="12" y1="19" x2="12" y2="23"></line>
+                        <line x1="8" y1="23" x2="16" y2="23"></line>
+                    </svg>
+                    <span class="btn-text">Start Recording</span>
+                </button>
+
+                <div class="recording-indicator" style="display: none;">
+                    <div class="pulse"></div>
+                    <span>Recording...</span>
+                </div>
+
+                <div class="audio-preview" style="display: none;">
+                    <audio id="audioPlayback" controls></audio>
+                    <button id="analyzeButton" class="analyze-btn">Analyze My Accent (Baseline)</button>
+                </div>
+            </div>
+
+            <div id="results" class="results-section" style="display: none;">
+                <div class="warning-banner">
+                    <p><strong>Remember:</strong> These results are from an untrained model!</p>
+                </div>
+                
+                <h2>Your Regional Accent (Baseline Prediction)</h2>
+                <div class="main-result">
+                    <div class="region-name"></div>
+                    <div class="confidence"></div>
+                </div>
+                
+                <div class="probability-chart">
+                    <h3>Regional Probabilities (Random Baseline)</h3>
+                    <div class="chart-container"></div>
+                </div>
+
+                <div class="share-section">
+                    <button id="shareButton" class="share-btn">Share My Results</button>
+                    <button id="tryAgainButton" class="try-again-btn">Try Again</button>
+                </div>
+            </div>
+
+            <div id="loading" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>Analyzing your accent (with untrained model)...</p>
+            </div>
+        </main>
+
+        <footer>
+            <p>🤖 Using BASELINE Wav2Vec2 model (not fine-tuned)</p>
+            <p class="disclaimer">This is for testing only. Results are random due to untrained weights.</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

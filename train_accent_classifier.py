@@ -30,6 +30,47 @@ import matplotlib.pyplot as plt
 from unified_dataset import UnifiedSample, UnifiedAccentDatasetTorch
 
 
+def calculate_speaker_consistency(sample_ids, predictions):
+    """Calculate speaker consistency metric
+    
+    Returns the percentage of speakers where all samples get the same prediction
+    """
+    # Extract speaker IDs from sample IDs
+    # Sample ID format: "{dataset_name}_{speaker_id}_{utterance_id}"
+    speaker_predictions = {}
+    for sample_id, pred in zip(sample_ids, predictions):
+        # Split and reconstruct to handle speaker_ids that may contain underscores
+        parts = sample_id.split('_')
+        if len(parts) >= 3:
+            # First part is dataset_name, last part is utterance_id
+            # Everything in between is the speaker_id
+            dataset_name = parts[0]
+            speaker_id = '_'.join(parts[1:-1])
+            full_speaker_id = f"{dataset_name}_{speaker_id}"
+        else:
+            # Fallback if format is different
+            full_speaker_id = sample_id
+        
+        if full_speaker_id not in speaker_predictions:
+            speaker_predictions[full_speaker_id] = []
+        speaker_predictions[full_speaker_id].append(pred)
+    
+    # Calculate consistency
+    consistent_speakers = 0
+    total_speakers = 0
+    
+    for speaker_id, preds in speaker_predictions.items():
+        if len(preds) > 1:  # Only count speakers with multiple samples
+            total_speakers += 1
+            if len(set(preds)) == 1:  # All predictions are the same
+                consistent_speakers += 1
+    
+    # Return consistency rate, or 1.0 if no multi-sample speakers
+    if total_speakers == 0:
+        return 1.0
+    return consistent_speakers / total_speakers
+
+
 def collate_fn(batch):
     """Custom collate function to handle batching"""
     # Stack tensors
@@ -38,13 +79,13 @@ def collate_fn(batch):
     labels = torch.stack([item['labels'] for item in batch])
     
     # Keep metadata as lists (if needed)
-    speaker_ids = [item['speaker_id'] for item in batch]
+    sample_ids = [item['sample_id'] for item in batch]
     
     return {
         'input_values': input_values,
         'attention_mask': attention_mask,
         'labels': labels,
-        'speaker_ids': speaker_ids
+        'sample_ids': sample_ids
     }
 
 
@@ -243,11 +284,13 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args):
     return total_loss / len(train_loader)
 
 
-def evaluate(model, eval_loader, device, dataset_name="val"):
-    """Evaluate model"""
+def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
+    """Evaluate model with extended metrics"""
     model.eval()
     all_predictions = []
     all_labels = []
+    all_logits = []
+    all_sample_ids = []
     total_loss = 0
     
     with torch.no_grad():
@@ -255,6 +298,7 @@ def evaluate(model, eval_loader, device, dataset_name="val"):
             input_values = batch['input_values'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
+            sample_ids = batch['sample_ids']
             
             outputs = model(
                 input_values=input_values,
@@ -264,19 +308,58 @@ def evaluate(model, eval_loader, device, dataset_name="val"):
             
             total_loss += outputs.loss.item()
             
-            predictions = outputs.logits.argmax(dim=-1)
+            logits = outputs.logits
+            predictions = logits.argmax(dim=-1)
+            
             all_predictions.extend(predictions.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+            all_logits.extend(logits.cpu().numpy())
+            all_sample_ids.extend(sample_ids)
     
-    # Calculate metrics
+    # Convert to numpy arrays
+    all_predictions = np.array(all_predictions)
+    all_labels = np.array(all_labels)
+    all_logits = np.array(all_logits)
+    
+    # Calculate basic metrics
     accuracy = accuracy_score(all_labels, all_predictions)
     avg_loss = total_loss / len(eval_loader)
+    
+    # Calculate top-k accuracy
+    top_k_predictions = np.argsort(all_logits, axis=1)[:, ::-1]  # Sort in descending order
+    top2_correct = np.any(top_k_predictions[:, :2] == all_labels[:, np.newaxis], axis=1)
+    top3_correct = np.any(top_k_predictions[:, :3] == all_labels[:, np.newaxis], axis=1)
+    top2_accuracy = np.mean(top2_correct)
+    top3_accuracy = np.mean(top3_correct)
+    
+    # Calculate per-class metrics including F1 scores
+    per_class_report = classification_report(
+        all_labels, all_predictions, 
+        output_dict=True, 
+        zero_division=0
+    )
+    
+    # Extract F1 scores for each class
+    per_class_f1 = {}
+    for i in range(num_classes):
+        if str(i) in per_class_report:
+            per_class_f1[i] = per_class_report[str(i)]['f1-score']
+        else:
+            per_class_f1[i] = 0.0
+    
+    # Calculate speaker consistency metric
+    speaker_consistency = calculate_speaker_consistency(all_sample_ids, all_predictions)
     
     return {
         'loss': avg_loss,
         'accuracy': accuracy,
+        'top2_accuracy': top2_accuracy,
+        'top3_accuracy': top3_accuracy,
         'predictions': all_predictions,
-        'labels': all_labels
+        'labels': all_labels,
+        'per_class_f1': per_class_f1,
+        'speaker_consistency': speaker_consistency,
+        'confusion_matrix': confusion_matrix(all_labels, all_predictions)
     }
 
 
@@ -382,17 +465,40 @@ def main():
         print(f"Average training loss: {train_loss:.4f}")
         
         # Evaluate
-        val_results = evaluate(model, val_loader, device, "validation")
+        val_results = evaluate(model, val_loader, device, "validation", num_labels)
         print(f"Validation loss: {val_results['loss']:.4f}")
         print(f"Validation accuracy: {val_results['accuracy']:.4f}")
+        print(f"Validation top-2 accuracy: {val_results['top2_accuracy']:.4f}")
+        print(f"Validation top-3 accuracy: {val_results['top3_accuracy']:.4f}")
+        print(f"Speaker consistency: {val_results['speaker_consistency']:.4f}")
         
         # Log to wandb
         if args.use_wandb:
-            wandb.log({
+            log_dict = {
                 'epoch': epoch,
                 'train/epoch_loss': train_loss,
                 'val/loss': val_results['loss'],
-                'val/accuracy': val_results['accuracy']
+                'val/accuracy': val_results['accuracy'],
+                'val/top2_accuracy': val_results['top2_accuracy'],
+                'val/top3_accuracy': val_results['top3_accuracy'],
+                'val/speaker_consistency': val_results['speaker_consistency']
+            }
+            
+            # Add per-region F1 scores
+            for class_idx, f1_score in val_results['per_class_f1'].items():
+                region_name = label_names[class_idx] if class_idx < len(label_names) else f"class_{class_idx}"
+                log_dict[f'val/f1_{region_name}'] = f1_score
+            
+            # Log confusion matrix as a wandb Table
+            cm = val_results['confusion_matrix']
+            wandb.log({
+                **log_dict,
+                'val/confusion_matrix': wandb.plot.confusion_matrix(
+                    probs=None,
+                    y_true=val_results['labels'],
+                    preds=val_results['predictions'],
+                    class_names=label_names
+                )
             })
         
         # Save best model
@@ -405,9 +511,12 @@ def main():
     
     # Final evaluation on test set
     print("\nEvaluating on test set...")
-    test_results = evaluate(model, test_loader, device, "test")
+    test_results = evaluate(model, test_loader, device, "test", num_labels)
     print(f"Test loss: {test_results['loss']:.4f}")
     print(f"Test accuracy: {test_results['accuracy']:.4f}")
+    print(f"Test top-2 accuracy: {test_results['top2_accuracy']:.4f}")
+    print(f"Test top-3 accuracy: {test_results['top3_accuracy']:.4f}")
+    print(f"Speaker consistency: {test_results['speaker_consistency']:.4f}")
     
     # Generate and save classification report
     print("\nClassification Report:")
@@ -438,7 +547,11 @@ def main():
         },
         'best_val_accuracy': best_val_accuracy,
         'test_accuracy': test_results['accuracy'],
+        'test_top2_accuracy': test_results['top2_accuracy'],
+        'test_top3_accuracy': test_results['top3_accuracy'],
+        'test_speaker_consistency': test_results['speaker_consistency'],
         'test_loss': test_results['loss'],
+        'test_per_class_f1': test_results['per_class_f1'],
         'classification_report': report
     }
     
@@ -446,9 +559,28 @@ def main():
         json.dump(results, f, indent=2)
     
     if args.use_wandb:
-        wandb.log({
+        test_log_dict = {
             'test/loss': test_results['loss'],
-            'test/accuracy': test_results['accuracy']
+            'test/accuracy': test_results['accuracy'],
+            'test/top2_accuracy': test_results['top2_accuracy'],
+            'test/top3_accuracy': test_results['top3_accuracy'],
+            'test/speaker_consistency': test_results['speaker_consistency']
+        }
+        
+        # Add per-region F1 scores for test set
+        for class_idx, f1_score in test_results['per_class_f1'].items():
+            region_name = label_names[class_idx] if class_idx < len(label_names) else f"class_{class_idx}"
+            test_log_dict[f'test/f1_{region_name}'] = f1_score
+        
+        # Log test confusion matrix
+        wandb.log({
+            **test_log_dict,
+            'test/confusion_matrix': wandb.plot.confusion_matrix(
+                probs=None,
+                y_true=test_results['labels'],
+                preds=test_results['predictions'],
+                class_names=label_names
+            )
         })
         wandb.finish()
     

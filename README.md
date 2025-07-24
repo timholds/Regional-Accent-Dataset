@@ -9,11 +9,65 @@ This project trains a model to identify US regional accents from audio. We combi
 ## Quick Start
 
 ```bash
-# Prepare dataset
+# 1. Activate environment
+source accent-env/bin/activate
+
+# 2. Prepare dataset
 python prepare_dataset.py --datasets TIMIT CommonVoice CORAAL
 
-# Train model
+# 3. Train model
 python train_accent_classifier.py --dataset_path prepared_datasets/accent_dataset_*
+```
+
+## Detailed Usage
+
+### Dataset Preparation
+
+```bash
+# Basic usage with one dataset
+python prepare_dataset.py --datasets TIMIT
+
+# Multiple datasets with custom settings
+python prepare_dataset.py \
+    --datasets TIMIT CommonVoice CORAAL \
+    --output_dir prepared_datasets \
+    --dataset_name my_accent_dataset \
+    --val_ratio 0.15 \
+    --test_ratio 0.15 \
+    --min_samples_per_speaker 5 \
+    --seed 42
+
+# Testing with limited data
+python prepare_dataset.py \
+    --datasets TIMIT \
+    --max_samples_per_dataset 100 \
+    --dry_run  # Preview without saving
+```
+
+### Model Training
+
+```bash
+# Basic training
+python train_accent_classifier.py \
+    --dataset_path prepared_datasets/my_accent_dataset \
+    --model_name facebook/wav2vec2-base \
+    --num_epochs 10 \
+    --batch_size 16 \
+    --learning_rate 3e-4 \
+    --output_dir models/accent_classifier
+
+# With LoRA (efficient fine-tuning)
+python train_accent_classifier.py \
+    --dataset_path prepared_datasets/my_accent_dataset \
+    --use_lora \
+    --num_epochs 5 \
+    --batch_size 8
+
+# With Weights & Biases logging
+python train_accent_classifier.py \
+    --dataset_path prepared_datasets/my_accent_dataset \
+    --use_wandb \
+    --wandb_project accent-classifier
 ```
 
 ## Label Mapping
@@ -66,8 +120,27 @@ pip install -r requirements.txt
 
 ## Datasets
 
-- **TIMIT**: Classic speech dataset with dialect regions
-- **Mozilla Common Voice**: Crowdsourced with self-reported accents
-- **CORAAL**: Corpus of Regional African American Language
+- **TIMIT**: Classic speech dataset with dialect regions (~5.4 hours, 630 speakers)
+- **Mozilla Common Voice**: Crowdsourced with self-reported accents (2,984 hours US English)
+- **CORAAL**: Corpus of Regional African American Language (150 hours conversational)
 
-See DATASET_PREPARATION_GUIDE.md for detailed setup instructions.
+See `docs/DATASETS_DOCUMENTATION.md` for detailed dataset information.
+
+## Output Structure
+
+After dataset preparation:
+```
+prepared_datasets/my_accent_dataset/
+├── train.csv          # Training samples
+├── val.csv            # Validation samples  
+├── test.csv           # Test samples
+├── metadata.json      # Dataset statistics
+└── config.json        # Loading configuration
+```
+
+## Troubleshooting
+
+- **Import errors**: Ensure you're in the project directory and venv is activated
+- **Dataset not found**: Check paths in `data/` directory match expected structure
+- **Memory errors**: Reduce `batch_size` or use `max_samples_per_dataset`
+- **No samples after filtering**: Reduce `min_samples_per_speaker` requirement

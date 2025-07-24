@@ -136,9 +136,7 @@ def main():
     
     # Generate dataset name if not provided
     if args.dataset_name is None:
-        datasets_str = "_".join(sorted(args.datasets))
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.dataset_name = f"accent_dataset_{datasets_str}_{timestamp}"
+        args.dataset_name = "accent_dataset"
     
     # Setup output directory
     output_path = Path(args.output_dir) / args.dataset_name
