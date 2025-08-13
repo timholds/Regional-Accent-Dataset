@@ -105,11 +105,19 @@ regional-accent/
 ├── unified_dataset.py          # Dataset loading/unification
 ├── region_mappings.py          # State → Region mappings
 ├── audio_data_analysis.py      # Audio compatibility checks
-└── data/                       # Downloaded datasets
-    ├── TIMIT/
+└── data/                       # Downloaded datasets (after cleanup)
+    ├── timit_docs/             # TIMIT documentation files
+    ├── TRAIN/                  # Training audio data
+    │   ├── DR1/                # Dialect regions DR1-DR8
+    │   └── ...                 # Each contains speaker folders
+    ├── TEST/                   # Test audio data
+    │   ├── DR1/                # Same structure as TRAIN
+    │   └── ...
     ├── CommonVoice/
     └── CORAAL/
 ```
+
+Note: Run `cleanup_timit_data.py` after downloading TIMIT to fix the nested directory structure and remove duplicate `.WAV.wav` files.
 
 ## Requirements
 

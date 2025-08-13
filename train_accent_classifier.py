@@ -132,8 +132,6 @@ def parse_args():
                        help="Log every N steps")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed")
-    parser.add_argument("--use_wandb", action="store_true",
-                       help="Use Weights & Biases for logging")
     parser.add_argument("--wandb_project", type=str, default="accent-classifier",
                        help="W&B project name")
     
@@ -274,7 +272,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args):
         })
         
         # Logging
-        if args.use_wandb and step % args.logging_steps == 0:
+        if step % args.logging_steps == 0:
             wandb.log({
                 'train/loss': loss.item() * args.gradient_accumulation_steps,
                 'train/learning_rate': scheduler.get_last_lr()[0],
@@ -387,9 +385,10 @@ def main():
     # Setup output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Initialize wandb if requested
-    if args.use_wandb:
-        wandb.init(project=args.wandb_project, config=args)
+    # Initialize wandb with timestamp-based run name
+    from datetime import datetime
+    run_name = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    wandb.init(project=args.wandb_project, config=args, name=run_name)
     
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -473,33 +472,32 @@ def main():
         print(f"Speaker consistency: {val_results['speaker_consistency']:.4f}")
         
         # Log to wandb
-        if args.use_wandb:
-            log_dict = {
-                'epoch': epoch,
-                'train/epoch_loss': train_loss,
-                'val/loss': val_results['loss'],
-                'val/accuracy': val_results['accuracy'],
-                'val/top2_accuracy': val_results['top2_accuracy'],
-                'val/top3_accuracy': val_results['top3_accuracy'],
-                'val/speaker_consistency': val_results['speaker_consistency']
-            }
-            
-            # Add per-region F1 scores
-            for class_idx, f1_score in val_results['per_class_f1'].items():
-                region_name = label_names[class_idx] if class_idx < len(label_names) else f"class_{class_idx}"
-                log_dict[f'val/f1_{region_name}'] = f1_score
-            
-            # Log confusion matrix as a wandb Table
-            cm = val_results['confusion_matrix']
-            wandb.log({
-                **log_dict,
-                'val/confusion_matrix': wandb.plot.confusion_matrix(
-                    probs=None,
-                    y_true=val_results['labels'],
-                    preds=val_results['predictions'],
-                    class_names=label_names
-                )
-            })
+        log_dict = {
+            'epoch': epoch,
+            'train/epoch_loss': train_loss,
+            'val/loss': val_results['loss'],
+            'val/accuracy': val_results['accuracy'],
+            'val/top2_accuracy': val_results['top2_accuracy'],
+            'val/top3_accuracy': val_results['top3_accuracy'],
+            'val/speaker_consistency': val_results['speaker_consistency']
+        }
+        
+        # Add per-region F1 scores
+        for class_idx, f1_score in val_results['per_class_f1'].items():
+            region_name = label_names[class_idx] if class_idx < len(label_names) else f"class_{class_idx}"
+            log_dict[f'val/f1_{region_name}'] = f1_score
+        
+        # Log confusion matrix as a wandb Table
+        cm = val_results['confusion_matrix']
+        wandb.log({
+            **log_dict,
+            'val/confusion_matrix': wandb.plot.confusion_matrix(
+                probs=None,
+                y_true=val_results['labels'],
+                preds=val_results['predictions'],
+                class_names=label_names
+            )
+        })
         
         # Save best model
         if val_results['accuracy'] > best_val_accuracy:
@@ -558,31 +556,31 @@ def main():
     with open(os.path.join(args.output_dir, 'results.json'), 'w') as f:
         json.dump(results, f, indent=2)
     
-    if args.use_wandb:
-        test_log_dict = {
-            'test/loss': test_results['loss'],
-            'test/accuracy': test_results['accuracy'],
-            'test/top2_accuracy': test_results['top2_accuracy'],
-            'test/top3_accuracy': test_results['top3_accuracy'],
-            'test/speaker_consistency': test_results['speaker_consistency']
-        }
-        
-        # Add per-region F1 scores for test set
-        for class_idx, f1_score in test_results['per_class_f1'].items():
-            region_name = label_names[class_idx] if class_idx < len(label_names) else f"class_{class_idx}"
-            test_log_dict[f'test/f1_{region_name}'] = f1_score
-        
-        # Log test confusion matrix
-        wandb.log({
-            **test_log_dict,
-            'test/confusion_matrix': wandb.plot.confusion_matrix(
-                probs=None,
-                y_true=test_results['labels'],
-                preds=test_results['predictions'],
-                class_names=label_names
-            )
-        })
-        wandb.finish()
+    # Log final test results to wandb
+    test_log_dict = {
+        'test/loss': test_results['loss'],
+        'test/accuracy': test_results['accuracy'],
+        'test/top2_accuracy': test_results['top2_accuracy'],
+        'test/top3_accuracy': test_results['top3_accuracy'],
+        'test/speaker_consistency': test_results['speaker_consistency']
+    }
+    
+    # Add per-region F1 scores for test set
+    for class_idx, f1_score in test_results['per_class_f1'].items():
+        region_name = label_names[class_idx] if class_idx < len(label_names) else f"class_{class_idx}"
+        test_log_dict[f'test/f1_{region_name}'] = f1_score
+    
+    # Log test confusion matrix
+    wandb.log({
+        **test_log_dict,
+        'test/confusion_matrix': wandb.plot.confusion_matrix(
+            probs=None,
+            y_true=test_results['labels'],
+            preds=test_results['predictions'],
+            class_names=label_names
+        )
+    })
+    wandb.finish()
     
     print(f"\nTraining complete! Results saved to {args.output_dir}")
     print(f"  - Best model: {os.path.join(args.output_dir, 'best_model')}")

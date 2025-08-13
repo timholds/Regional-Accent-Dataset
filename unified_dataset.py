@@ -151,8 +151,9 @@ class TIMITLoader(BaseDatasetLoader):
     
     def download(self) -> bool:
         """TIMIT is already downloaded"""
-        timit_path = self.data_root / 'data' / 'data'
-        if timit_path.exists():
+        timit_path = self.data_root
+        # Check if TIMIT directories exist
+        if (timit_path / 'TRAIN').exists() and (timit_path / 'TEST').exists():
             logger.info("TIMIT dataset found")
             return True
         logger.error(f"TIMIT not found at {timit_path}")
@@ -166,7 +167,7 @@ class TIMITLoader(BaseDatasetLoader):
         from timit_dataset import TimitDatasetLoader, TIMIT_REGIONS
         
         logger.info("Loading TIMIT dataset...")
-        loader = TimitDatasetLoader(str(self.data_root / 'data' / 'data'))
+        loader = TimitDatasetLoader(str(self.data_root))
         timit_samples = loader.load_dataset()
         
         # Convert to unified format
