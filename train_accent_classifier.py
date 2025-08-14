@@ -100,7 +100,7 @@ def parse_args():
     parser.add_argument("--model_name", type=str, 
                        default="facebook/wav2vec2-base",
                        help="Pretrained model to use")
-    parser.add_argument("--num_labels", type=int, default=8,
+    parser.add_argument("--num_labels", type=int, default=6,
                        help="Number of accent classes")
     parser.add_argument("--use_lora", action="store_true",
                        help="Use LoRA for efficient fine-tuning")
@@ -112,7 +112,7 @@ def parse_args():
                        help="Evaluation batch size")
     parser.add_argument("--num_epochs", type=int, default=10,
                        help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=2e-5,
+    parser.add_argument("--learning_rate", type=float, default=5e-5,  # Increased from 2e-5
                        help="Learning rate")
     parser.add_argument("--warmup_steps", type=int, default=500,
                        help="Number of warmup steps")
@@ -468,11 +468,14 @@ def main():
     class_counts = pd.Series(train_labels).value_counts()
     total_samples = len(train_labels)
     
-    # Calculate inverse frequency weights
+    # Calculate stronger class weights using sqrt of inverse frequency
+    # This provides smoother weights that still balance classes
     class_weights = []
+    max_count = class_counts.max()
     for label_name in label_names:
         count = class_counts.get(label_name, 1)  # Avoid division by zero
-        weight = total_samples / (num_labels * count)
+        # Use sqrt for smoother weights that still provide strong balancing
+        weight = np.sqrt(max_count / count)
         class_weights.append(weight)
         print(f"  {label_name}: count={count}, weight={weight:.3f}")
     

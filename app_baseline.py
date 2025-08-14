@@ -50,10 +50,10 @@ def load_baseline_model():
         # Load the base Wav2Vec2 model and processor
         processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
         
-        # Create model with classification head for 8 regions
+        # Create model with classification head for 6 regions
         model = Wav2Vec2ForSequenceClassification.from_pretrained(
             "facebook/wav2vec2-base",
-            num_labels=8
+            num_labels=6
         )
         
         # The classification head is randomly initialized by default
