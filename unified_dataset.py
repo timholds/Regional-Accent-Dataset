@@ -780,22 +780,32 @@ class UnifiedAccentDatasetTorch(Dataset):
     """PyTorch Dataset wrapper for unified samples"""
     
     def __init__(self, samples: List[UnifiedSample], processor, 
-                 target_sr: int = 16000, max_length: int = 160000):
+                 target_sr: int = 16000, max_length: int = 160000, 
+                 label_mapping: Optional[Dict[str, int]] = None):
         self.samples = samples
         self.processor = processor
         self.target_sr = target_sr
         self.max_length = max_length
         
-        # Create label mapping
-        self.region_to_label = {}
-        self.label_to_region = {}
+        # Use provided label mapping or create from all possible regions
+        if label_mapping is not None:
+            self.region_to_label = label_mapping
+        else:
+            # Default mapping for all expected regions
+            self.region_to_label = {
+                'Deep South': 0,
+                'Lower Midwest': 1,
+                'New England': 2,
+                'New York Metropolitan': 3,
+                'Upper Midwest': 4,
+                'West': 5,
+                'Mid-Atlantic': 6,
+                'South Atlantic': 7
+            }
         
-        unique_regions = sorted(set(s.region_label for s in samples))
-        for i, region in enumerate(unique_regions):
-            self.region_to_label[region] = i
-            self.label_to_region[i] = region
+        self.label_to_region = {v: k for k, v in self.region_to_label.items()}
             
-        logger.info(f"Created label mapping for {len(unique_regions)} regions")
+        logger.info(f"Using label mapping with {len(self.region_to_label)} regions: {self.region_to_label}")
     
     def __len__(self):
         return len(self.samples)

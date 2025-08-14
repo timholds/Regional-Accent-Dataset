@@ -21,7 +21,6 @@ from transformers import (
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
-from pathlib import Path
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import wandb
 import json
@@ -113,7 +112,7 @@ def parse_args():
                        help="Evaluation batch size")
     parser.add_argument("--num_epochs", type=int, default=10,
                        help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=5e-4,
+    parser.add_argument("--learning_rate", type=float, default=2e-5,
                        help="Learning rate")
     parser.add_argument("--warmup_steps", type=int, default=500,
                        help="Number of warmup steps")
@@ -193,10 +192,11 @@ def load_prepared_dataset(dataset_path: str, processor):
     val_samples = df_to_samples(val_df)
     test_samples = df_to_samples(test_df)
     
-    # Create PyTorch datasets
-    train_dataset = UnifiedAccentDatasetTorch(train_samples, processor)
-    val_dataset = UnifiedAccentDatasetTorch(val_samples, processor)
-    test_dataset = UnifiedAccentDatasetTorch(test_samples, processor)
+    # Create PyTorch datasets with consistent label mapping from config
+    label_mapping = config.get('label_mapping', None)
+    train_dataset = UnifiedAccentDatasetTorch(train_samples, processor, label_mapping=label_mapping)
+    val_dataset = UnifiedAccentDatasetTorch(val_samples, processor, label_mapping=label_mapping)
+    test_dataset = UnifiedAccentDatasetTorch(test_samples, processor, label_mapping=label_mapping)
     
     return train_dataset, val_dataset, test_dataset, config, metadata
 
@@ -463,9 +463,10 @@ def main():
     
     # Calculate class weights for imbalanced data
     print("\nCalculating class weights...")
-    train_df = pd.read_csv(Path(args.dataset_path) / "train.csv")
-    class_counts = train_df['region_label'].value_counts()
-    total_samples = len(train_df)
+    # Use the already loaded train_dataset samples instead of re-reading CSV
+    train_labels = [sample.region_label for sample in train_dataset.samples]
+    class_counts = pd.Series(train_labels).value_counts()
+    total_samples = len(train_labels)
     
     # Calculate inverse frequency weights
     class_weights = []
@@ -485,10 +486,11 @@ def main():
     # Setup optimizer and scheduler
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
     
-    # Fix: Calculate total steps correctly accounting for gradient accumulation
+    # Calculate total steps correctly accounting for gradient accumulation
     total_steps = len(train_loader) * args.num_epochs // args.gradient_accumulation_steps
-    # Fix: Make warmup proportional to epoch length
-    warmup_steps = min(args.warmup_steps, len(train_loader) // 2)  # At most half an epoch
+    # Make warmup proportional to epoch length (10% of first epoch by default)
+    steps_per_epoch = len(train_loader) // args.gradient_accumulation_steps
+    warmup_steps = min(args.warmup_steps, max(10, steps_per_epoch // 10))
     
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
