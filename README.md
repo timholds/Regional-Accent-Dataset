@@ -2,6 +2,15 @@
 
 Fine-tuning Wav2Vec2 to classify US regional accents using multiple datasets.
 
+## Quick Start - Full Pipeline
+
+```bash
+# Prepare unified dataset from all three sources (TIMIT, CommonVoice, CORAAL)
+python prepare_dataset.py --datasets TIMIT CommonVoice CORAAL --output_dir prepared_dataset
+# Train the model
+python train_accent_classifier.py --dataset_path prepared_dataset/accent_dataset
+```
+
 ## Overview
 
 This project trains a model to identify US regional accents from audio. We combine three major datasets (TIMIT, Mozilla Common Voice, and CORAAL) into a unified training pipeline.

@@ -19,6 +19,9 @@ import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import logging
 import tarfile
+import zipfile
+import shutil
+import subprocess
 import requests
 from urllib.parse import urlparse
 
@@ -150,14 +153,87 @@ class TIMITLoader(BaseDatasetLoader):
     """Loader for TIMIT dataset"""
     
     def download(self) -> bool:
-        """TIMIT is already downloaded"""
+        """Download TIMIT dataset from Kaggle if not already present"""
         timit_path = self.data_root
+        
         # Check if TIMIT directories exist
         if (timit_path / 'TRAIN').exists() and (timit_path / 'TEST').exists():
             logger.info("TIMIT dataset found")
             return True
-        logger.error(f"TIMIT not found at {timit_path}")
-        return False
+        
+        # Try to download from Kaggle
+        logger.info("TIMIT not found locally. Attempting to download from Kaggle...")
+        
+        # Check if kaggle CLI is available and configured
+        try:
+            result = subprocess.run(['kaggle', '--version'], capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error("Kaggle CLI not found. Please install with: pip install kaggle")
+                return False
+        except FileNotFoundError:
+            logger.error("Kaggle CLI not found. Please install with: pip install kaggle")
+            return False
+        
+        # Check for Kaggle API credentials
+        kaggle_config = Path.home() / '.kaggle' / 'kaggle.json'
+        if not kaggle_config.exists():
+            logger.error("Kaggle API credentials not found. Please:")
+            logger.error("1. Go to https://www.kaggle.com/account")
+            logger.error("2. Create New API Token")
+            logger.error(f"3. Place kaggle.json at {kaggle_config}")
+            return False
+        
+        # Download the dataset
+        cache_dir = self.cache_dir / 'timit'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        logger.info("Downloading TIMIT corpus from Kaggle (this may take a few minutes)...")
+        download_cmd = [
+            'kaggle', 'datasets', 'download',
+            '-d', 'mfekadu/darpa-timit-acousticphonetic-continuous-speech',
+            '-p', str(cache_dir),
+            '--unzip'
+        ]
+        
+        result = subprocess.run(download_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error(f"Failed to download TIMIT: {result.stderr}")
+            return False
+        
+        logger.info("TIMIT downloaded successfully. Organizing files...")
+        
+        # The mfekadu dataset has structure: data/TRAIN and data/TEST
+        kaggle_data_path = cache_dir / 'data'
+        
+        if kaggle_data_path.exists():
+            # Move TRAIN and TEST to the data_root
+            if (kaggle_data_path / 'TRAIN').exists():
+                target_train = timit_path / 'TRAIN'
+                if target_train.exists():
+                    shutil.rmtree(target_train)
+                shutil.move(str(kaggle_data_path / 'TRAIN'), str(timit_path))
+                logger.info(f"Moved TRAIN directory to {timit_path}")
+            
+            if (kaggle_data_path / 'TEST').exists():
+                target_test = timit_path / 'TEST'
+                if target_test.exists():
+                    shutil.rmtree(target_test)
+                shutil.move(str(kaggle_data_path / 'TEST'), str(timit_path))
+                logger.info(f"Moved TEST directory to {timit_path}")
+            
+            # Clean up the cache directory
+            shutil.rmtree(cache_dir)
+            
+            # Remove duplicate .WAV.wav files if they exist
+            logger.info("Cleaning up duplicate .WAV.wav files...")
+            for wav_file in timit_path.rglob("*.WAV.wav"):
+                wav_file.unlink()
+                
+            logger.info("TIMIT dataset ready for use")
+            return True
+        else:
+            logger.error(f"Unexpected dataset structure. Please check {cache_dir}")
+            return False
     
     def load(self) -> List[UnifiedSample]:
         """Load TIMIT dataset"""

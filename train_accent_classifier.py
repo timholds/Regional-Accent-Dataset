@@ -21,6 +21,7 @@ from transformers import (
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import wandb
 import json
@@ -112,7 +113,7 @@ def parse_args():
                        help="Evaluation batch size")
     parser.add_argument("--num_epochs", type=int, default=10,
                        help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=3e-4,
+    parser.add_argument("--learning_rate", type=float, default=5e-4,
                        help="Learning rate")
     parser.add_argument("--warmup_steps", type=int, default=500,
                        help="Number of warmup steps")
@@ -233,10 +234,12 @@ def setup_model(args, num_labels):
     return model
 
 
-def train_epoch(model, train_loader, optimizer, scheduler, device, args):
+def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_weights=None):
     """Train for one epoch"""
     model.train()
     total_loss = 0
+    total_grad_norm = 0
+    grad_norm_steps = 0
     progress_bar = tqdm(train_loader, desc="Training")
     
     for step, batch in enumerate(progress_bar):
@@ -252,23 +255,37 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args):
             labels=labels
         )
         
-        loss = outputs.loss / args.gradient_accumulation_steps
-        total_loss += loss.item()
+        # Apply class weights if provided
+        if class_weights is not None:
+            logits = outputs.logits
+            loss_fct = nn.CrossEntropyLoss(weight=class_weights.to(device))
+            loss = loss_fct(logits, labels)
+        else:
+            loss = outputs.loss
+            
+        loss = loss / args.gradient_accumulation_steps
+        total_loss += loss.item() * args.gradient_accumulation_steps
         
         # Backward pass
         loss.backward()
         
         # Update weights
         if (step + 1) % args.gradient_accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            # Calculate gradient norm before clipping
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            total_grad_norm += grad_norm.item()
+            grad_norm_steps += 1
+            
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
         
         # Update progress bar
+        avg_grad_norm = total_grad_norm / max(1, grad_norm_steps)
         progress_bar.set_postfix({
             'loss': loss.item() * args.gradient_accumulation_steps,
-            'lr': scheduler.get_last_lr()[0]
+            'lr': scheduler.get_last_lr()[0],
+            'grad_norm': f'{avg_grad_norm:.3f}'
         })
         
         # Logging
@@ -276,6 +293,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args):
             wandb.log({
                 'train/loss': loss.item() * args.gradient_accumulation_steps,
                 'train/learning_rate': scheduler.get_last_lr()[0],
+                'train/grad_norm': avg_grad_norm,
                 'train/step': step
             })
     
@@ -443,6 +461,23 @@ def main():
     print(f"\nNumber of accent classes: {num_labels}")
     print(f"Classes: {', '.join(label_names)}")
     
+    # Calculate class weights for imbalanced data
+    print("\nCalculating class weights...")
+    train_df = pd.read_csv(Path(args.dataset_path) / "train.csv")
+    class_counts = train_df['region_label'].value_counts()
+    total_samples = len(train_df)
+    
+    # Calculate inverse frequency weights
+    class_weights = []
+    for label_name in label_names:
+        count = class_counts.get(label_name, 1)  # Avoid division by zero
+        weight = total_samples / (num_labels * count)
+        class_weights.append(weight)
+        print(f"  {label_name}: count={count}, weight={weight:.3f}")
+    
+    class_weights = torch.FloatTensor(class_weights)
+    print(f"Class weights: {class_weights}")
+    
     # Setup model
     model = setup_model(args, num_labels)
     model.to(device)
@@ -450,12 +485,17 @@ def main():
     # Setup optimizer and scheduler
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
     
-    total_steps = len(train_loader) * args.num_epochs
+    # Fix: Calculate total steps correctly accounting for gradient accumulation
+    total_steps = len(train_loader) * args.num_epochs // args.gradient_accumulation_steps
+    # Fix: Make warmup proportional to epoch length
+    warmup_steps = min(args.warmup_steps, len(train_loader) // 2)  # At most half an epoch
+    
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=args.warmup_steps,
+        num_warmup_steps=warmup_steps,
         num_training_steps=total_steps
     )
+    print(f"\nScheduler setup: total_steps={total_steps}, warmup_steps={warmup_steps}")
     
     # Training loop
     print(f"\nStarting training for {args.num_epochs} epochs...")
@@ -465,7 +505,7 @@ def main():
         print(f"\nEpoch {epoch + 1}/{args.num_epochs}")
         
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, scheduler, device, args)
+        train_loss = train_epoch(model, train_loader, optimizer, scheduler, device, args, class_weights)
         print(f"Average training loss: {train_loss:.4f}")
         
         # Evaluate
