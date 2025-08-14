@@ -112,13 +112,13 @@ def parse_args():
                        help="Evaluation batch size")
     parser.add_argument("--num_epochs", type=int, default=10,
                        help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=5e-5,  # Increased from 2e-5
+    parser.add_argument("--learning_rate", type=float, default=1e-4,  # Increased to 1e-4 for faster learning
                        help="Learning rate")
     parser.add_argument("--warmup_steps", type=int, default=500,
                        help="Number of warmup steps")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
                        help="Gradient accumulation steps")
-    parser.add_argument("--max_grad_norm", type=float, default=1.0,
+    parser.add_argument("--max_grad_norm", type=float, default=0.5,
                        help="Max gradient norm for clipping")
     
     # Other arguments
@@ -208,8 +208,13 @@ def setup_model(args, num_labels):
     model = Wav2Vec2ForSequenceClassification.from_pretrained(
         args.model_name,
         num_labels=num_labels,
-        output_hidden_states=True
+        output_hidden_states=True,
+        gradient_checkpointing=False  # Disable to avoid potential issues
     )
+    
+    # Freeze the feature encoder to prevent gradient explosion
+    # This is common practice for Wav2Vec2 fine-tuning
+    model.freeze_feature_encoder()
     
     if args.use_lora:
         print("Applying LoRA for efficient fine-tuning...")
@@ -468,14 +473,16 @@ def main():
     class_counts = pd.Series(train_labels).value_counts()
     total_samples = len(train_labels)
     
-    # Calculate stronger class weights using sqrt of inverse frequency
-    # This provides smoother weights that still balance classes
+    # Calculate MUCH stronger class weights to force the model to learn minority classes
+    # Using direct ratio instead of sqrt for aggressive balancing
     class_weights = []
     max_count = class_counts.max()
     for label_name in label_names:
         count = class_counts.get(label_name, 1)  # Avoid division by zero
-        # Use sqrt for smoother weights that still provide strong balancing
-        weight = np.sqrt(max_count / count)
+        # Direct ratio for very strong balancing (no sqrt)
+        weight = max_count / count
+        # Cap at 5x to prevent instability
+        weight = min(weight, 5.0)
         class_weights.append(weight)
         print(f"  {label_name}: count={count}, weight={weight:.3f}")
     
