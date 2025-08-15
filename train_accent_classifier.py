@@ -112,14 +112,24 @@ def parse_args():
                        help="Evaluation batch size")
     parser.add_argument("--num_epochs", type=int, default=10,
                        help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=1e-4,  # Increased to 1e-4 for faster learning
+    parser.add_argument("--learning_rate", type=float, default=3e-5,  # Lower for stable training
                        help="Learning rate")
     parser.add_argument("--warmup_steps", type=int, default=500,
                        help="Number of warmup steps")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
                        help="Gradient accumulation steps")
     parser.add_argument("--max_grad_norm", type=float, default=0.5,
                        help="Max gradient norm for clipping")
+    parser.add_argument("--weight_decay", type=float, default=0.01,
+                       help="Weight decay for AdamW optimizer")
+    parser.add_argument("--dropout_rate", type=float, default=0.1,
+                       help="Dropout rate for LoRA and model layers")
+    parser.add_argument("--lora_r", type=int, default=16,
+                       help="LoRA rank (dimension of adaptation)")
+    parser.add_argument("--class_weight_power", type=float, default=0.5,
+                       help="Power for class weight calculation (0=no weighting, 0.5=sqrt, 1=linear)")
+    parser.add_argument("--class_weight_max", type=float, default=3.0,
+                       help="Maximum class weight to prevent instability")
     
     # Other arguments
     parser.add_argument("--output_dir", type=str, default="accent_classifier_output",
@@ -212,9 +222,14 @@ def setup_model(args, num_labels):
         gradient_checkpointing=False  # Disable to avoid potential issues
     )
     
-    # Freeze the feature encoder to prevent gradient explosion
-    # This is common practice for Wav2Vec2 fine-tuning
+    # Freeze the entire feature extractor and encoder
+    # Only the classifier head will be trainable (~1,500 params for 6 classes)
     model.freeze_feature_encoder()
+    
+    # Freeze ALL transformer layers - we only want to train the classifier
+    for name, param in model.named_parameters():
+        if "classifier" not in name:
+            param.requires_grad = False
     
     if args.use_lora:
         print("Applying LoRA for efficient fine-tuning...")
@@ -224,9 +239,9 @@ def setup_model(args, num_labels):
             
             peft_config = LoraConfig(
                 task_type=TaskType.SEQ_CLS,
-                r=16,
-                lora_alpha=16,
-                lora_dropout=0.1,
+                r=args.lora_r,
+                lora_alpha=args.lora_r,  # Common to set alpha equal to r
+                lora_dropout=args.dropout_rate,
                 target_modules=["q_proj", "v_proj"],  # Wav2Vec2 attention layers
             )
             
@@ -473,16 +488,18 @@ def main():
     class_counts = pd.Series(train_labels).value_counts()
     total_samples = len(train_labels)
     
-    # Calculate MUCH stronger class weights to force the model to learn minority classes
-    # Using direct ratio instead of sqrt for aggressive balancing
+    # Calculate class weights based on configurable power parameter
     class_weights = []
     max_count = class_counts.max()
     for label_name in label_names:
         count = class_counts.get(label_name, 1)  # Avoid division by zero
-        # Direct ratio for very strong balancing (no sqrt)
-        weight = max_count / count
-        # Cap at 5x to prevent instability
-        weight = min(weight, 5.0)
+        # Use configurable power for balancing (0=no weighting, 0.5=sqrt, 1=linear)
+        if args.class_weight_power > 0:
+            weight = (max_count / count) ** args.class_weight_power
+            # Cap at max weight to prevent instability
+            weight = min(weight, args.class_weight_max)
+        else:
+            weight = 1.0  # No weighting if power is 0
         class_weights.append(weight)
         print(f"  {label_name}: count={count}, weight={weight:.3f}")
     
@@ -494,7 +511,7 @@ def main():
     model.to(device)
     
     # Setup optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr=args.learning_rate)
+    optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     
     # Calculate total steps correctly accounting for gradient accumulation
     total_steps = len(train_loader) * args.num_epochs // args.gradient_accumulation_steps

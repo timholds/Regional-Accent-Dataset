@@ -819,25 +819,25 @@ class UnifiedAccentDatasetTorch(Dataset):
         import librosa
         audio, sr = librosa.load(sample.audio_path, sr=self.target_sr)
         
-        # Only truncate if too long, let processor handle padding
+        # Pad or truncate
         if len(audio) > self.max_length:
             audio = audio[:self.max_length]
+        elif len(audio) < self.max_length:
+            audio = np.pad(audio, (0, self.max_length - len(audio)))
         
-        # Process with model processor - it handles normalization and padding
+        # Process with model processor
         inputs = self.processor(
             audio, 
             sampling_rate=self.target_sr, 
             return_tensors="pt",
-            padding='max_length',
-            max_length=self.max_length,
-            truncation=True
+            padding=False  # We already padded
         )
         
         label = self.region_to_label[sample.region_label]
         
         return {
             'input_values': inputs.input_values.squeeze(),
-            'attention_mask': inputs.attention_mask.squeeze() if 'attention_mask' in inputs else torch.ones(self.max_length),
+            'attention_mask': torch.ones_like(inputs.input_values.squeeze()),  # For now, use all ones
             'labels': torch.tensor(label, dtype=torch.long),
             'sample_id': sample.sample_id
         }

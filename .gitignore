@@ -2,3 +2,9 @@ data/
 prepared_dataset/
 .png*
 docs/
+TEST/
+TRAIN/
+confusion_matrix*
+debug*
+wandb/
+accent_classifier_output/
