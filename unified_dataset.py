@@ -819,9 +819,13 @@ class UnifiedAccentDatasetTorch(Dataset):
         import librosa
         audio, sr = librosa.load(sample.audio_path, sr=self.target_sr)
         
+        # Track original length before padding
+        original_length = len(audio)
+        
         # Pad or truncate
         if len(audio) > self.max_length:
             audio = audio[:self.max_length]
+            original_length = self.max_length
         elif len(audio) < self.max_length:
             audio = np.pad(audio, (0, self.max_length - len(audio)))
         
@@ -833,11 +837,15 @@ class UnifiedAccentDatasetTorch(Dataset):
             padding=False  # We already padded
         )
         
+        # Create proper attention mask (1 for real audio, 0 for padding)
+        attention_mask = torch.zeros(self.max_length, dtype=torch.float32)
+        attention_mask[:original_length] = 1.0
+        
         label = self.region_to_label[sample.region_label]
         
         return {
             'input_values': inputs.input_values.squeeze(),
-            'attention_mask': torch.ones_like(inputs.input_values.squeeze()),  # For now, use all ones
+            'attention_mask': attention_mask,
             'labels': torch.tensor(label, dtype=torch.long),
             'sample_id': sample.sample_id
         }

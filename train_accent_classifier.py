@@ -144,6 +144,8 @@ def parse_args():
                        help="Random seed")
     parser.add_argument("--wandb_project", type=str, default="accent-classifier",
                        help="W&B project name")
+    parser.add_argument("--desc", type=str, default=None,
+                       help="Run description to log with wandb (e.g., 'LoRA test with LR .0003')")
     
     return parser.parse_args()
 
@@ -423,10 +425,22 @@ def main():
     # Setup output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Initialize wandb with timestamp-based run name
+    # Initialize wandb with timestamp-based run name and optional description
     from datetime import datetime
-    run_name = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    wandb.init(project=args.wandb_project, config=args, name=run_name)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    
+    # Create run name with optional description
+    if args.desc:
+        run_name = f"{timestamp} - {args.desc}"
+    else:
+        run_name = timestamp
+    
+    # Add description to config for logging
+    config = vars(args)
+    if args.desc:
+        config['run_description'] = args.desc
+    
+    wandb.init(project=args.wandb_project, config=config, name=run_name, notes=args.desc)
     
     # Setup device
     if torch.cuda.is_available():

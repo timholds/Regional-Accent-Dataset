@@ -155,19 +155,6 @@ prepared_datasets/my_accent_dataset/
 └── config.json        # Loading configuration
 ```
 
-## Model Details
-
-### Key Configuration
-
-Based on the current training script (`train_accent_classifier.py`), here are the key model details:
-
-1. **Model Architecture**: Using `Wav2Vec2ForSequenceClassification` from Hugging Face Transformers
-2. **Feature Encoder Freezing**: The CNN feature encoder is frozen via `model.freeze_feature_encoder()` (line 217)
-3. **Transformer Layer Freezing**: First 10 of 12 transformer layers are frozen (lines 221-226), keeping only layers 10-11 trainable
-4. **Class Weighting**: Implements class weights using `sqrt(max_count/count)` capped at 3.0 for handling imbalanced data (lines 478-499)
-5. **Gradient Clipping**: Uses gradient clipping with `max_grad_norm=0.5` (line 289)
-6. **Learning Rate**: Default learning rate is 3e-5 with linear warmup scheduler
-
 ## Troubleshooting
 
 - **Import errors**: Ensure you're in the project directory and venv is activated
