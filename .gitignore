@@ -8,3 +8,5 @@ confusion_matrix*
 debug*
 wandb/
 accent_classifier_output/
+feature_cache/
+*cache/

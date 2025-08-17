@@ -28,6 +28,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from unified_dataset import UnifiedSample, UnifiedAccentDatasetTorch
+from simple_cached_dataset import SimpleCachedDataset
 
 
 def calculate_speaker_consistency(sample_ids, predictions):
@@ -113,8 +114,8 @@ def parse_args():
                        help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=3e-5,  # Lower for stable training
                        help="Learning rate")
-    parser.add_argument("--warmup_steps", type=int, default=500,
-                       help="Number of warmup steps")
+    parser.add_argument("--warmup_ratio", type=float, default=0.1,
+                       help="Ratio of total training steps for warmup (default: 0.1)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
                        help="Gradient accumulation steps")
     parser.add_argument("--max_grad_norm", type=float, default=0.5,
@@ -135,6 +136,10 @@ def parse_args():
     # Other arguments
     parser.add_argument("--output_dir", type=str, default="accent_classifier_output",
                        help="Output directory for model and logs")
+    parser.add_argument("--use_cache", action="store_true",
+                       help="Cache processed features for faster subsequent runs")
+    parser.add_argument("--clear_cache", action="store_true",
+                       help="Clear existing cache before training")
     parser.add_argument("--save_steps", type=int, default=500,
                        help="Save checkpoint every N steps")
     parser.add_argument("--eval_steps", type=int, default=100,
@@ -147,11 +152,15 @@ def parse_args():
                        help="W&B project name")
     parser.add_argument("--desc", type=str, default=None,
                        help="Run description to log with wandb (e.g., 'LoRA test with LR .0003')")
+    parser.add_argument("--chunk_duration", type=float, default=7.5,
+                       help="Target chunk duration in seconds (default: 7.5)")
+    parser.add_argument("--chunk_overlap", type=float, default=2.5,
+                       help="Chunk overlap in seconds (default: 2.5)")
     
     return parser.parse_args()
 
 
-def load_prepared_dataset(dataset_path: str, processor):
+def load_prepared_dataset(dataset_path: str, processor, args=None):
     """Load a prepared dataset"""
     dataset_path = Path(dataset_path)
     
@@ -207,9 +216,55 @@ def load_prepared_dataset(dataset_path: str, processor):
     
     # Create PyTorch datasets with consistent label mapping from config
     label_mapping = config.get('label_mapping', None)
-    train_dataset = UnifiedAccentDatasetTorch(train_samples, processor, label_mapping=label_mapping)
-    val_dataset = UnifiedAccentDatasetTorch(val_samples, processor, label_mapping=label_mapping)
-    test_dataset = UnifiedAccentDatasetTorch(test_samples, processor, label_mapping=label_mapping)
+    
+    # Simple: use cached dataset if requested, otherwise standard dataset
+    if getattr(args, 'use_cache', False):
+        train_dataset = SimpleCachedDataset(train_samples, processor, label_mapping=label_mapping)
+        val_dataset = SimpleCachedDataset(val_samples, processor, label_mapping=label_mapping)
+        test_dataset = SimpleCachedDataset(test_samples, processor, label_mapping=label_mapping)
+    else:
+        # Enable chunking for long audio files (CORAAL, SBCSAE, etc.)
+        # Convert seconds to samples at 16kHz
+        chunk_length_samples = int(args.chunk_duration * 16000)
+        chunk_overlap_samples = int(args.chunk_overlap * 16000)
+        
+        train_dataset = UnifiedAccentDatasetTorch(
+            train_samples, processor, 
+            label_mapping=label_mapping,
+            enable_chunking=True,
+            chunk_length=chunk_length_samples,
+            chunk_overlap=chunk_overlap_samples
+        )
+        val_dataset = UnifiedAccentDatasetTorch(
+            val_samples, processor, 
+            label_mapping=label_mapping,
+            enable_chunking=True,
+            chunk_length=chunk_length_samples,
+            chunk_overlap=chunk_overlap_samples
+        )
+        test_dataset = UnifiedAccentDatasetTorch(
+            test_samples, processor, 
+            label_mapping=label_mapping,
+            enable_chunking=True,
+            chunk_length=chunk_length_samples,
+            chunk_overlap=chunk_overlap_samples
+        )
+    
+    # Clear cache if requested
+    if getattr(args, 'clear_cache', False) and getattr(args, 'use_cache', False):
+        print("\nClearing feature cache...")
+        for dataset in [train_dataset, val_dataset, test_dataset]:
+            if hasattr(dataset, 'clear_cache'):
+                dataset.clear_cache()
+    
+    # Print cache stats if using cache
+    if getattr(args, 'use_cache', False):
+        print("\nCache Statistics:")
+        for name, dataset in [("Train", train_dataset), ("Val", val_dataset), ("Test", test_dataset)]:
+            if hasattr(dataset, 'get_cache_stats'):
+                stats = dataset.get_cache_stats()
+                print(f"  {name}: {stats['cached_samples']}/{stats['total_samples']} cached "
+                      f"({stats['cache_hit_rate']*100:.1f}%)")
     
     return train_dataset, val_dataset, test_dataset, config, metadata
 
@@ -313,9 +368,56 @@ def print_model_summary(model, args=None):
     print("="*60 + "\n")
 
 
-def setup_model(args, num_labels):
+def setup_model(args, num_labels, use_cached=False):
     """Setup model with optional LoRA"""
     print(f"Loading model: {args.model_name}")
+    
+    if use_cached:
+        print("\nDEBUG: use_cached=True, creating CachedEncoderClassifier.\n")
+        # For cached encoder outputs, create lightweight classifier
+        print("Using lightweight classifier for cached encoder outputs")
+        
+        class CachedEncoderClassifier(nn.Module):
+            def __init__(self, hidden_size, hidden_dim, num_labels, dropout_rate):
+                super().__init__()
+                self.classifier = nn.Sequential(
+                    nn.Linear(hidden_size, hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout_rate),
+                    nn.Linear(hidden_dim, hidden_dim // 2),
+                    nn.ReLU(),
+                    nn.Dropout(dropout_rate),
+                    nn.Linear(hidden_dim // 2, num_labels)
+                )
+            
+            def forward(self, input_values, attention_mask=None, labels=None):
+                # input_values are encoder outputs [batch, seq_len, hidden_size]
+                hidden_states = input_values
+                
+                # Pool over sequence dimension using attention mask
+                if attention_mask is not None:
+                    mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size())
+                    sum_hidden = torch.sum(hidden_states * mask_expanded, dim=1)
+                    sum_mask = torch.sum(attention_mask, dim=1, keepdim=True)
+                    pooled = sum_hidden / sum_mask
+                else:
+                    pooled = hidden_states.mean(dim=1)
+                
+                logits = self.classifier(pooled)
+                
+                loss = None
+                if labels is not None:
+                    loss_fct = nn.CrossEntropyLoss()
+                    loss = loss_fct(logits, labels)
+                
+                from transformers.modeling_outputs import SequenceClassifierOutput
+                return SequenceClassifierOutput(loss=loss, logits=logits)
+            
+            def save_pretrained(self, path):
+                os.makedirs(path, exist_ok=True)
+                torch.save(self.state_dict(), os.path.join(path, 'pytorch_model.bin'))
+        
+        return CachedEncoderClassifier(768, args.hidden_dim, num_labels, args.dropout_rate)
     
     model = Wav2Vec2ForSequenceClassification.from_pretrained(
         args.model_name,
@@ -325,21 +427,21 @@ def setup_model(args, num_labels):
     )
     
     # Bypass the projector and use full encoder output (768 dims)
-    hidden_size = model.config.hidden_size  # Should be 768 for wav2vec2-base
+    wav2vec_output_size = model.config.hidden_size  # Should be 768 for wav2vec2-base
     
     # Replace both projector and classifier with our custom MLP
-    # Architecture: 768 -> hidden_dim -> hidden_dim//2 -> num_classes
-    hidden_dim = args.hidden_dim
+    # Architecture: 768 -> classifier_hidden -> classifier_hidden//2 -> num_classes
+    classifier_hidden = args.hidden_dim
     
     # Create new classifier that takes encoder output directly
     new_classifier = nn.Sequential(
-        nn.Linear(hidden_size, hidden_dim),
+        nn.Linear(wav2vec_output_size, classifier_hidden),
         nn.ReLU(),
         nn.Dropout(args.dropout_rate),
-        nn.Linear(hidden_dim, hidden_dim // 2),
+        nn.Linear(classifier_hidden, classifier_hidden // 2),
         nn.ReLU(),
         nn.Dropout(args.dropout_rate),
-        nn.Linear(hidden_dim // 2, num_labels)
+        nn.Linear(classifier_hidden // 2, num_labels)
     )
     
     # Replace the projector with identity (bypass it)
@@ -363,7 +465,9 @@ def setup_model(args, num_labels):
             from peft import LoraConfig, get_peft_model, TaskType
             
             peft_config = LoraConfig(
-                task_type=TaskType.SEQ_CLS,
+                # Use FEATURE_EXTRACTION to prevent PEFT from renaming `input_values` to `input_ids`,
+                # which causes a TypeError with Wav2Vec2.
+                task_type=TaskType.FEATURE_EXTRACTION,
                 r=args.lora_r,
                 lora_alpha=args.lora_r,  # Common to set alpha equal to r
                 lora_dropout=args.dropout_rate,
@@ -382,6 +486,13 @@ def setup_model(args, num_labels):
 def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_weights=None):
     """Train for one epoch"""
     model.train()
+
+    # Workaround for a known peft issue with Wav2Vec2 feature extractor
+    # when using LoRA. Forcing the feature extractor to eval mode avoids
+    # a tensor shape mismatch error.
+    if args.use_lora:
+        model.base_model.wav2vec2.feature_extractor.eval()
+
     total_loss = 0
     total_grad_norm = 0
     grad_norm_steps = 0
@@ -581,7 +692,7 @@ def main():
     # Load prepared dataset
     print(f"\nLoading prepared dataset from {args.dataset_path}")
     train_dataset, val_dataset, test_dataset, config, metadata = load_prepared_dataset(
-        args.dataset_path, processor
+        args.dataset_path, processor, args
     )
     
     # Create data loaders
@@ -644,7 +755,7 @@ def main():
     print(f"Class weights: {class_weights}")
     
     # Setup model
-    model = setup_model(args, num_labels)
+    model = setup_model(args, num_labels, use_cached=getattr(args, 'use_cache', False))
     model.to(device)
     
     # Print model summary
@@ -655,9 +766,8 @@ def main():
     
     # Calculate total steps correctly accounting for gradient accumulation
     total_steps = len(train_loader) * args.epochs // args.gradient_accumulation_steps
-    # Make warmup proportional to epoch length (10% of first epoch by default)
-    steps_per_epoch = len(train_loader) // args.gradient_accumulation_steps
-    warmup_steps = min(args.warmup_steps, max(10, steps_per_epoch // 10))
+    # Calculate warmup steps based on ratio
+    warmup_steps = int(total_steps * args.warmup_ratio)
     
     scheduler = get_linear_schedule_with_warmup(
         optimizer,

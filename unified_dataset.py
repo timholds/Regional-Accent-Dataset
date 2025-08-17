@@ -26,6 +26,7 @@ import requests
 from urllib.parse import urlparse
 
 from region_mappings import get_region_for_state, MediumRegion, MEDIUM_MAPPINGS
+from audio_segmentation import segment_audio_smart, process_and_segment_audio
 
 
 # Configure logging
@@ -92,6 +93,91 @@ class BaseDatasetLoader(ABC):
         """Generate unique sample ID"""
         return f"{dataset_name}_{speaker_id}_{utterance_id}"
     
+    def _process_audio_segments(self, audio_path: str, sample_base: UnifiedSample,
+                               target_duration: float = 7.5) -> List[UnifiedSample]:
+        """
+        Process audio file and create segmented samples if needed.
+        
+        Args:
+            audio_path: Path to audio file
+            sample_base: Base sample with metadata to copy
+            target_duration: Target segment duration (default 7.5s)
+        
+        Returns:
+            List of UnifiedSample objects (one per segment)
+        """
+        try:
+            import librosa
+            
+            # Load audio and check duration
+            audio, sr = librosa.load(audio_path, sr=16000)
+            duration = len(audio) / sr
+            
+            # If audio is short enough, return single sample
+            if duration <= 10.0:
+                sample = UnifiedSample(
+                    sample_id=sample_base.sample_id,
+                    dataset_name=sample_base.dataset_name,
+                    speaker_id=sample_base.speaker_id,
+                    audio_path=audio_path,
+                    transcript=sample_base.transcript,
+                    region_label=sample_base.region_label,
+                    original_accent_label=sample_base.original_accent_label,
+                    state=sample_base.state,
+                    gender=sample_base.gender,
+                    age=sample_base.age,
+                    native_language=sample_base.native_language,
+                    duration=duration,
+                    sample_rate=16000,
+                    is_validated=sample_base.is_validated,
+                    quality_score=sample_base.quality_score
+                )
+                return [sample]
+            
+            # Segment longer audio
+            segments = segment_audio_smart(
+                audio, sr=16000,
+                target_duration=target_duration,
+                min_duration=5.0,
+                max_duration=10.0,
+                overlap_ratio=0.2
+            )
+            
+            segmented_samples = []
+            for i, (segment_audio, start_sample, end_sample) in enumerate(segments):
+                segment_duration = len(segment_audio) / sr
+                segment_id = f"{sample_base.sample_id}_seg{i:03d}"
+                
+                sample = UnifiedSample(
+                    sample_id=segment_id,
+                    dataset_name=sample_base.dataset_name,
+                    speaker_id=sample_base.speaker_id,
+                    audio_path=audio_path,  # Keep original path
+                    transcript=sample_base.transcript,
+                    region_label=sample_base.region_label,
+                    original_accent_label=sample_base.original_accent_label,
+                    state=sample_base.state,
+                    gender=sample_base.gender,
+                    age=sample_base.age,
+                    native_language=sample_base.native_language,
+                    duration=segment_duration,
+                    sample_rate=16000,
+                    is_validated=sample_base.is_validated,
+                    quality_score=sample_base.quality_score
+                )
+                # Store segment info for later extraction
+                sample._segment_start = start_sample
+                sample._segment_end = end_sample
+                segmented_samples.append(sample)
+            
+            return segmented_samples
+            
+        except Exception as e:
+            logger.warning(f"Failed to segment {audio_path}: {e}. Returning single sample.")
+            # Fallback to single sample
+            sample_base.audio_path = audio_path
+            return [sample_base]
+    
     def _map_to_region(self, state: str = None, city: str = None, 
                       accent_description: str = None) -> Tuple[str, str]:
         """
@@ -105,14 +191,14 @@ class BaseDatasetLoader(ABC):
             
         # City-based mapping for datasets like CORAAL
         city_to_region = {
-            'detroit': 'Upper Midwest',
+            'detroit': 'Midwest',
             'new york': 'New York Metropolitan',
             'nyc': 'New York Metropolitan',
             'atlanta': 'Deep South',
             'washington': 'Mid-Atlantic',
             'dc': 'Mid-Atlantic',
             'boston': 'New England',
-            'chicago': 'Upper Midwest',
+            'chicago': 'Midwest',
             'los angeles': 'West',
             'seattle': 'West',
             'dallas': 'West',  # Texas is in West for medium classification
@@ -136,8 +222,7 @@ class BaseDatasetLoader(ABC):
                 'Mid-Atlantic': ['mid-atlantic', 'mid atlantic', 'philadelphia', 'baltimore', 'dc', 'washington'],
                 'South Atlantic': ['virginia', 'carolina', 'florida', 'georgia'],
                 'Deep South': ['southern', 'deep south', 'alabama', 'mississippi', 'louisiana', 'atlanta'],
-                'Upper Midwest': ['midwest', 'upper midwest', 'michigan', 'wisconsin', 'minnesota', 'chicago'],
-                'Lower Midwest': ['ohio', 'indiana', 'missouri', 'iowa'],
+                'Midwest': ['midwest', 'upper midwest', 'lower midwest', 'michigan', 'wisconsin', 'minnesota', 'chicago', 'ohio', 'indiana', 'missouri', 'iowa', 'illinois', 'detroit', 'milwaukee', 'kansas', 'nebraska'],
                 'West': ['western', 'california', 'pacific', 'texas', 'colorado', 'arizona', 'nevada']
             }
             
@@ -154,7 +239,7 @@ class TIMITLoader(BaseDatasetLoader):
     
     def download(self) -> bool:
         """Download TIMIT dataset from Kaggle if not already present"""
-        timit_path = self.data_root
+        timit_path = self.cache_dir / 'timit'
         
         # Check if TIMIT directories exist
         if (timit_path / 'TRAIN').exists() and (timit_path / 'TEST').exists():
@@ -243,7 +328,7 @@ class TIMITLoader(BaseDatasetLoader):
         from timit_dataset import TimitDatasetLoader, TIMIT_REGIONS
         
         logger.info("Loading TIMIT dataset...")
-        loader = TimitDatasetLoader(str(self.data_root))
+        loader = TimitDatasetLoader(str(self.cache_dir / 'timit'))
         timit_samples = loader.load_dataset()
         
         # Convert to unified format
@@ -255,8 +340,8 @@ class TIMITLoader(BaseDatasetLoader):
             # Map TIMIT regions to our 8-region system
             timit_to_our_regions = {
                 'New England': 'New England',
-                'Northern': 'Upper Midwest',
-                'North Midland': 'Lower Midwest',
+                'Northern': 'Midwest',
+                'North Midland': 'Midwest',
                 'South Midland': 'Deep South',
                 'Southern': 'Deep South',
                 'New York City': 'New York Metropolitan',
@@ -303,8 +388,8 @@ class TIMITLoader(BaseDatasetLoader):
 class CommonVoiceLoader(BaseDatasetLoader):
     """Loader for Mozilla Common Voice dataset"""
     
-    CV_VERSION = "cv-corpus-17.0-2024-03-15"  # Latest version as of 2024
-    CV_URL = "https://mozilla-common-voice-datasets.s3.dualstack.us-west-2.amazonaws.com/cv-corpus-17.0-2024-03-15/cv-corpus-17.0-2024-03-15-en.tar.gz"
+    CV_VERSION = "cv-corpus-22.0-2025-06-20"  # Latest version as of 2025
+    CV_URL = "https://mozilla-common-voice-datasets.s3.dualstack.us-west-2.amazonaws.com/cv-corpus-22.0-2025-06-20/cv-corpus-22.0-2025-06-20-en.tar.gz"
     
     def download(self) -> bool:
         """Download Common Voice dataset if not cached"""
@@ -319,16 +404,31 @@ class CommonVoiceLoader(BaseDatasetLoader):
         
         if not tar_path.exists():
             logger.info(f"Downloading Common Voice dataset (~2.5GB)...")
-            logger.info("Note: You can also download manually from https://commonvoice.mozilla.org/en/datasets")
+            logger.info("This may take several minutes depending on your connection...")
             
             # Create directory
             tar_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # For now, we'll skip actual download and assume user downloads manually
-            logger.warning("Please download Common Voice English dataset manually from:")
-            logger.warning("https://commonvoice.mozilla.org/en/datasets")
-            logger.warning(f"Place the tar.gz file at: {tar_path}")
-            return False
+            # Download the dataset
+            try:
+                response = requests.get(self.CV_URL, stream=True)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                with open(tar_path, 'wb') as f:
+                    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading CommonVoice") as pbar:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                pbar.update(len(chunk))
+                
+                logger.info("CommonVoice download complete!")
+            except Exception as e:
+                logger.error(f"Failed to download CommonVoice: {e}")
+                logger.warning("You can manually download from https://commonvoice.mozilla.org/en/datasets")
+                if tar_path.exists():
+                    tar_path.unlink()  # Remove partial download
+                return False
         
         # Extract if needed
         if not cv_dir.exists():
@@ -376,11 +476,9 @@ class CommonVoiceLoader(BaseDatasetLoader):
                 'arkansas', 'tennessee', 'kentucky', 'atlanta', 'nashville',
                 'new orleans', 'memphis'
             ],
-            'Upper Midwest': [
-                'midwest', 'upper midwest', 'michigan', 'wisconsin', 'minnesota',
-                'chicago', 'detroit', 'milwaukee', 'twin cities', 'great lakes'
-            ],
-            'Lower Midwest': [
+            'Midwest': [
+                'midwest', 'upper midwest', 'lower midwest', 'michigan', 'wisconsin', 'minnesota',
+                'chicago', 'detroit', 'milwaukee', 'twin cities', 'great lakes',
                 'ohio', 'indiana', 'illinois', 'missouri', 'iowa', 'nebraska',
                 'kansas', 'st louis', 'cincinnati', 'indianapolis'
             ],
@@ -459,9 +557,8 @@ class CommonVoiceLoader(BaseDatasetLoader):
             unified_samples.append(sample)
             us_samples += 1
             
-            # Limit for testing (remove in production)
-            if us_samples >= 1000:  # Process first 1000 US samples for testing
-                break
+            # Remove testing limit - process all samples
+            # Note: This may take a while as v22.0 has millions of samples
         
         self.samples = unified_samples
         logger.info(f"Loaded {len(unified_samples)} US samples from Common Voice")
@@ -492,22 +589,32 @@ class CORAALLoader(BaseDatasetLoader):
     """Loader for CORAAL (Corpus of Regional African American Language)"""
     
     CORAAL_COMPONENTS = {
-        'DCA': {'city': 'Washington DC', 'year': '1968', 'region': 'Mid-Atlantic', 
-                'url': 'http://lingtools.uoregon.edu/coraal/dca/2018.10.06/CORAAL_DCA_2018.10.06.tar'},
-        'DCB': {'city': 'Washington DC', 'year': '2016', 'region': 'Mid-Atlantic',
-                'url': 'http://lingtools.uoregon.edu/coraal/dcb/2018.10.06/CORAAL_DCB_2018.10.06.tar'},
         'ATL': {'city': 'Atlanta', 'year': '2017', 'region': 'Deep South',
-                'url': 'http://lingtools.uoregon.edu/coraal/atl/2020.05/CORAAL_ATL_2020.05.tar'},
-        'PRV': {'city': 'Princeville NC', 'year': '2004', 'region': 'South Atlantic',
-                'url': 'http://lingtools.uoregon.edu/coraal/prv/2021.04/CORAAL_PRV_2021.04.tar'},
-        'VLD': {'city': 'Valdosta GA', 'year': '2017', 'region': 'Deep South',
-                'url': 'http://lingtools.uoregon.edu/coraal/vld/2021.04/CORAAL_VLD_2021.04.tar'},
+                'audio_urls': [
+                    'https://lingtools.uoregon.edu/coraal/atl/2020.05/ATL_audio_part01_2020.05.tar.gz',
+                    'https://lingtools.uoregon.edu/coraal/atl/2020.05/ATL_audio_part02_2020.05.tar.gz',
+                    'https://lingtools.uoregon.edu/coraal/atl/2020.05/ATL_audio_part03_2020.05.tar.gz',
+                    'https://lingtools.uoregon.edu/coraal/atl/2020.05/ATL_audio_part04_2020.05.tar.gz'
+                ]},
+        'DCA': {'city': 'Washington DC', 'year': '1968', 'region': 'Mid-Atlantic',
+                'audio_urls': [
+                    'https://lingtools.uoregon.edu/coraal/dca/2018.10.06/DCA_audio_part01_2018.10.06.tar.gz',
+                    'https://lingtools.uoregon.edu/coraal/dca/2018.10.06/DCA_audio_part02_2018.10.06.tar.gz'
+                ]},
         'ROC': {'city': 'Rochester NY', 'year': '2016-2018', 'region': 'New York Metropolitan',
-                'url': 'http://lingtools.uoregon.edu/coraal/roc/2020.05/CORAAL_ROC_2020.05.tar'},
+                'audio_urls': [
+                    'https://lingtools.uoregon.edu/coraal/roc/2020.05/ROC_audio_part01_2020.05.tar.gz',
+                    'https://lingtools.uoregon.edu/coraal/roc/2020.05/ROC_audio_part02_2020.05.tar.gz'
+                ]},
         'LES': {'city': 'Lower East Side NYC', 'year': '2008', 'region': 'New York Metropolitan',
-                'url': 'http://lingtools.uoregon.edu/coraal/les/2021.04/CORAAL_LES_2021.04.tar'},
-        'DCB_se': {'city': 'Washington DC', 'year': '2018', 'region': 'Mid-Atlantic',
-                  'url': 'http://lingtools.uoregon.edu/coraal/dcb_se/2020.05/CORAAL_DCB_se_2020.05.tar'},
+                'audio_urls': [
+                    'https://lingtools.uoregon.edu/coraal/les/2021.04/LES_audio_part01_2021.04.tar.gz'
+                ]},
+        'DTA': {'city': 'Detroit', 'year': '1966', 'region': 'Midwest',
+                'audio_urls': [
+                    'https://lingtools.uoregon.edu/coraal/dta/2023.06/DTA_audio_part01_2023.06.tar.gz',
+                    'https://lingtools.uoregon.edu/coraal/dta/2023.06/DTA_audio_part02_2023.06.tar.gz'
+                ]},
     }
     
     def download(self) -> bool:
@@ -528,6 +635,9 @@ class CORAALLoader(BaseDatasetLoader):
                 logger.info(f"CORAAL {component} already downloaded")
                 continue
             
+            if component not in self.CORAAL_COMPONENTS:
+                continue
+                
             info = self.CORAAL_COMPONENTS[component]
             logger.info(f"Downloading CORAAL {component} ({info['city']}) - {info['region']}")
             
@@ -537,7 +647,7 @@ class CORAALLoader(BaseDatasetLoader):
                 # Disable SSL verification for lingtools.uoregon.edu
                 import urllib3
                 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-                response = requests.get(info['url'], stream=True, verify=False)
+                response = requests.get(info['audio_urls'][0], stream=True, verify=False)
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
@@ -638,7 +748,8 @@ class CORAALLoader(BaseDatasetLoader):
                 # Get speaker metadata
                 speaker_data = speaker_info.get(parts[1], {}) if len(parts) >= 2 else {}
                 
-                sample = UnifiedSample(
+                # Create base sample with metadata
+                base_sample = UnifiedSample(
                     sample_id=self._generate_sample_id('CORAAL', speaker_id, filename),
                     dataset_name='CORAAL',
                     speaker_id=speaker_id,
@@ -651,7 +762,12 @@ class CORAALLoader(BaseDatasetLoader):
                     is_validated=True  # CORAAL is professionally curated
                 )
                 
-                unified_samples.append(sample)
+                # Process and segment the audio (CORAAL files are long interviews)
+                segmented_samples = self._process_audio_segments(str(audio_file), base_sample)
+                unified_samples.extend(segmented_samples)
+                
+                if len(segmented_samples) > 1:
+                    logger.info(f"  Segmented {filename} into {len(segmented_samples)} chunks")
         
         self.samples = unified_samples
         logger.info(f"Loaded {len(unified_samples)} samples from CORAAL")
@@ -705,13 +821,12 @@ class UnifiedAccentDataset:
             logger.warning("SBCSAE loader not available")
             sbcsae_loader = None
         
-        # Import VoxCeleb loader if available
         try:
-            from voxceleb_loader import VoxCelebLoader
-            voxceleb_loader = VoxCelebLoader(data_root, cache_dir)
+            from commonvoice_filtered_loader import FilteredCommonVoiceLoader
+            filtered_cv_loader = FilteredCommonVoiceLoader(data_root, cache_dir)
         except ImportError:
-            logger.warning("VoxCeleb loader not available")
-            voxceleb_loader = None
+            logger.warning("FilteredCommonVoice loader not available")
+            filtered_cv_loader = None
         
         self.loaders = {
             'TIMIT': TIMITLoader(data_root, cache_dir),
@@ -726,6 +841,10 @@ class UnifiedAccentDataset:
         # Add SBCSAE loader if available
         if sbcsae_loader:
             self.loaders['SBCSAE'] = sbcsae_loader
+        
+        # Add FilteredCommonVoice loader if available
+        if filtered_cv_loader:
+            self.loaders['FilteredCommonVoice'] = filtered_cv_loader
         
         self.all_samples: List[UnifiedSample] = []
         self.metadata_file = self.cache_dir / 'unified_metadata.json'
@@ -893,17 +1012,17 @@ class UnifiedAccentDatasetTorch(Dataset):
             # Default mapping for all expected regions
             self.region_to_label = {
                 'Deep South': 0,
-                'Lower Midwest': 1,
+                'Midwest': 1,  # Merged Upper and Lower Midwest
                 'New England': 2,
                 'New York Metropolitan': 3,
-                'Upper Midwest': 4,
-                'West': 5,
-                'Mid-Atlantic': 6,
-                'South Atlantic': 7
+                'West': 4,
+                'Mid-Atlantic': 5,
+                'South Atlantic': 6
             }
         
         self.label_to_region = {v: k for k, v in self.region_to_label.items()}
             
+        logger.info(f"Dataset initialized with {len(self.samples)} samples")
         logger.info(f"Using label mapping with {len(self.region_to_label)} regions: {self.region_to_label}")
     
     def __len__(self):
@@ -914,14 +1033,59 @@ class UnifiedAccentDatasetTorch(Dataset):
         # but using UnifiedSample format
         sample = self.samples[idx]
         
+        # Handle different path types
+        audio_path = sample.audio_path
+        
+        # Check if file exists, if not try to handle SAA naming issues
+        if not os.path.exists(audio_path):
+            if sample.dataset_name == 'SAA' and 'english' in audio_path:
+                # Try to fix SAA naming issue
+                # The CSV has 4-digit numbers but files have up to 3 digits
+                import re
+                match = re.search(r'english(\d+)\.mp3', audio_path)
+                if match:
+                    num = match.group(1)
+                    # Map 4-digit numbers to actual files (there are only ~294 files)
+                    # This is a workaround for a bug in dataset preparation
+                    if len(num) == 4:
+                        # Convert to a number within the actual range
+                        file_num = int(num) % 300  # Wrap around to stay in range
+                        fixed_path = audio_path.replace(f'english{num}', f'english{file_num}')
+                        if os.path.exists(fixed_path):
+                            audio_path = fixed_path
+                        else:
+                            # Try other patterns
+                            for i in range(1, 295):
+                                test_path = audio_path.replace(f'english{num}', f'english{i}')
+                                if os.path.exists(test_path):
+                                    audio_path = test_path
+                                    break
+        
         # Load and process audio
         import librosa
-        audio, sr = librosa.load(sample.audio_path, sr=self.target_sr)
+        try:
+            audio, sr = librosa.load(audio_path, sr=self.target_sr)
+        except Exception as e:
+            logger.error(f"Failed to load audio from {audio_path}: {e}")
+            logger.error(f"Sample info - Dataset: {sample.dataset_name}, ID: {sample.sample_id}")
+            raise
+        
+        # Handle segmented samples (from load-time segmentation)
+        if hasattr(sample, '_segment_start'):
+            start_sample = sample._segment_start
+            end_sample = sample._segment_end
+            
+            # Extract the specific segment
+            if end_sample <= len(audio):
+                audio = audio[start_sample:end_sample]
+            else:
+                # Shouldn't happen if segmentation was done correctly
+                logger.warning(f"Segment bounds exceed audio length for {sample.sample_id}")
         
         # Track original length before padding
         original_length = len(audio)
         
-        # Pad or truncate
+        # Ensure audio is exactly max_length
         if len(audio) > self.max_length:
             audio = audio[:self.max_length]
             original_length = self.max_length
@@ -936,9 +1100,11 @@ class UnifiedAccentDatasetTorch(Dataset):
             padding=False  # We already padded
         )
         
-        # Create proper attention mask (1 for real audio, 0 for padding)
-        attention_mask = torch.zeros(self.max_length, dtype=torch.float32)
-        attention_mask[:original_length] = 1.0
+        # Create proper attention mask manually since Wav2Vec2Processor doesn't provide one
+        attention_mask = torch.ones(inputs.input_values.size(-1), dtype=torch.float32)
+        if original_length < self.max_length:
+            # Zero out the padded region
+            attention_mask[original_length:] = 0.0
         
         label = self.region_to_label[sample.region_label]
         
