@@ -33,7 +33,7 @@ def parse_args():
         "--datasets", 
         nargs="+", 
         default=["TIMIT"],
-        choices=["TIMIT", "CommonVoice", "CORAAL"],
+        choices=["TIMIT", "CommonVoice", "CORAAL", "SAA"],
         help="Datasets to include (default: TIMIT)"
     )
     
@@ -87,7 +87,7 @@ def parse_args():
     parser.add_argument(
         "--min_samples_per_speaker", 
         type=int, 
-        default=5,
+        default=1,
         help="Minimum samples per speaker to include"
     )
     
@@ -144,8 +144,9 @@ def main():
     # Check if dataset already exists
     if output_path.exists() and not args.force:
         print(f"Dataset already exists at {output_path}")
-        print("Use --force to overwrite or choose a different --dataset_name")
-        return
+        print("Overwriting existing dataset...")
+        # Remove the return statement to allow overwriting
+        # return
     
     print("="*60)
     print("PREPARING UNIFIED ACCENT DATASET")
@@ -182,16 +183,31 @@ def main():
         filtered_samples = limited_samples
         print(f"✓ Limited to {len(filtered_samples)} samples (max {args.max_samples_per_dataset} per dataset)")
     
+    # Check for missing datasets and show warning
+    samples_by_dataset = {}
+    for dataset in args.datasets:
+        dataset_samples = [s for s in filtered_samples if s.dataset_name == dataset]
+        samples_by_dataset[dataset] = len(dataset_samples)
+        if len(dataset_samples) == 0:
+            print(f"\n⚠️  WARNING: Dataset '{dataset}' has 0 samples! ⚠️")
+            print(f"   This dataset will not contribute to the training data.")
+            print(f"   Please check if the dataset is properly loaded or if filtering is too strict.\n")
+    
     # Show statistics
     print("\nDataset Statistics:")
     print("-" * 40)
+    print("\nSamples per dataset:")
+    for dataset, count in samples_by_dataset.items():
+        status = " ⚠️ NO SAMPLES!" if count == 0 else ""
+        print(f"  {dataset}: {count}{status}")
+    
     stats = unified.get_statistics()
     for key, value in stats.items():
-        if isinstance(value, dict):
+        if isinstance(value, dict) and key != "samples_per_dataset":  # Skip this since we show it above
             print(f"\n{key}:")
             for k, v in value.items():
                 print(f"  {k}: {v}")
-        else:
+        elif not isinstance(value, dict):
             print(f"{key}: {value}")
     
     if args.dry_run:

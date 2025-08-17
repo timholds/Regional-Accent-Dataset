@@ -492,41 +492,107 @@ class CORAALLoader(BaseDatasetLoader):
     """Loader for CORAAL (Corpus of Regional African American Language)"""
     
     CORAAL_COMPONENTS = {
-        'DCA': {'city': 'Washington DC', 'year': '1968', 'region': 'Mid-Atlantic'},
-        'DCB': {'city': 'Washington DC', 'year': '2016', 'region': 'Mid-Atlantic'},
-        'ATL': {'city': 'Atlanta', 'year': '2017', 'region': 'Deep South'},
-        'PRV': {'city': 'Princeville NC', 'year': '2004', 'region': 'South Atlantic'},
-        'VLD': {'city': 'Valdosta GA', 'year': '2017', 'region': 'Deep South'},
-        'ROC': {'city': 'Rochester NY', 'year': '2016-2018', 'region': 'New York Metropolitan'},
-        'LES': {'city': 'Lower East Side NYC', 'year': '2008', 'region': 'New York Metropolitan'},
-        'DCB_se': {'city': 'Washington DC', 'year': '2018', 'region': 'Mid-Atlantic'},
+        'DCA': {'city': 'Washington DC', 'year': '1968', 'region': 'Mid-Atlantic', 
+                'url': 'http://lingtools.uoregon.edu/coraal/dca/2018.10.06/CORAAL_DCA_2018.10.06.tar'},
+        'DCB': {'city': 'Washington DC', 'year': '2016', 'region': 'Mid-Atlantic',
+                'url': 'http://lingtools.uoregon.edu/coraal/dcb/2018.10.06/CORAAL_DCB_2018.10.06.tar'},
+        'ATL': {'city': 'Atlanta', 'year': '2017', 'region': 'Deep South',
+                'url': 'http://lingtools.uoregon.edu/coraal/atl/2020.05/CORAAL_ATL_2020.05.tar'},
+        'PRV': {'city': 'Princeville NC', 'year': '2004', 'region': 'South Atlantic',
+                'url': 'http://lingtools.uoregon.edu/coraal/prv/2021.04/CORAAL_PRV_2021.04.tar'},
+        'VLD': {'city': 'Valdosta GA', 'year': '2017', 'region': 'Deep South',
+                'url': 'http://lingtools.uoregon.edu/coraal/vld/2021.04/CORAAL_VLD_2021.04.tar'},
+        'ROC': {'city': 'Rochester NY', 'year': '2016-2018', 'region': 'New York Metropolitan',
+                'url': 'http://lingtools.uoregon.edu/coraal/roc/2020.05/CORAAL_ROC_2020.05.tar'},
+        'LES': {'city': 'Lower East Side NYC', 'year': '2008', 'region': 'New York Metropolitan',
+                'url': 'http://lingtools.uoregon.edu/coraal/les/2021.04/CORAAL_LES_2021.04.tar'},
+        'DCB_se': {'city': 'Washington DC', 'year': '2018', 'region': 'Mid-Atlantic',
+                  'url': 'http://lingtools.uoregon.edu/coraal/dcb_se/2020.05/CORAAL_DCB_se_2020.05.tar'},
     }
     
     def download(self) -> bool:
         """Download CORAAL dataset components"""
         coraal_dir = self.cache_dir / "coraal"
+        coraal_dir.mkdir(parents=True, exist_ok=True)
         
-        # Check if already downloaded
-        if coraal_dir.exists() and any(coraal_dir.glob("*/audio/*.wav")):
-            logger.info(f"CORAAL dataset found at {coraal_dir}")
+        # Components to prioritize for download (focus on weak regions)
+        priority_components = ['DCA', 'DCB', 'DCB_se', 'PRV', 'ATL', 'ROC', 'LES', 'VLD']
+        
+        downloaded_any = False
+        for component in priority_components:
+            component_dir = coraal_dir / component
+            audio_dir = component_dir / "audio"
+            
+            # Skip if already downloaded
+            if audio_dir.exists() and any(audio_dir.glob("*.wav")):
+                logger.info(f"CORAAL {component} already downloaded")
+                continue
+            
+            info = self.CORAAL_COMPONENTS[component]
+            logger.info(f"Downloading CORAAL {component} ({info['city']}) - {info['region']}")
+            
+            try:
+                # Download the tar file
+                tar_path = coraal_dir / f"{component}.tar"
+                # Disable SSL verification for lingtools.uoregon.edu
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                response = requests.get(info['url'], stream=True, verify=False)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                with open(tar_path, 'wb') as f:
+                    with tqdm(total=total_size, unit='B', unit_scale=True, desc=f"Downloading {component}") as pbar:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                            pbar.update(len(chunk))
+                
+                # Extract the tar file
+                logger.info(f"Extracting {component}...")
+                with tarfile.open(tar_path, 'r') as tar:
+                    # Extract to temp dir first to handle nested structure
+                    temp_dir = coraal_dir / f"temp_{component}"
+                    tar.extractall(temp_dir)
+                
+                # Find the actual CORAAL directory and move it
+                extracted_dirs = list(temp_dir.glob("CORAAL_*"))
+                if extracted_dirs:
+                    # Move the extracted content to the right location
+                    extracted_dir = extracted_dirs[0]
+                    if component_dir.exists():
+                        shutil.rmtree(component_dir)
+                    shutil.move(str(extracted_dir), str(component_dir))
+                    shutil.rmtree(temp_dir)
+                
+                # Clean up tar file
+                tar_path.unlink()
+                downloaded_any = True
+                logger.info(f"Successfully downloaded and extracted CORAAL {component}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to download CORAAL {component}: {e}")
+                # Clean up failed download
+                if tar_path.exists():
+                    tar_path.unlink()
+                continue
+        
+        # Check if we have at least some components
+        if any(coraal_dir.glob("*/audio/*.wav")):
+            logger.info(f"CORAAL dataset ready at {coraal_dir}")
             return True
         
-        logger.info("CORAAL download instructions:")
-        logger.info("1. Visit http://lingtools.uoregon.edu/coraal/")
-        logger.info("2. Download the components you want (ATL, DCA, LES, ROC recommended)")
-        logger.info("3. Extract each component to: " + str(coraal_dir))
-        logger.info("4. Directory structure should be: coraal/COMPONENT/audio/*.wav")
-        
-        # For now, return False and let user download manually
-        return False
+        return downloaded_any
     
     def load(self) -> List[UnifiedSample]:
         """Load CORAAL dataset"""
         coraal_dir = self.cache_dir / "coraal"
         
-        if not coraal_dir.exists():
-            logger.warning("CORAAL dataset not found. Please download it first.")
-            return []
+        # Try to download if not present
+        if not coraal_dir.exists() or not any(coraal_dir.glob("*/audio/*.wav")):
+            logger.info("CORAAL dataset not found. Attempting to download...")
+            if not self.download():
+                logger.warning("Failed to download CORAAL dataset")
+                return []
         
         unified_samples = []
         
@@ -622,11 +688,44 @@ class UnifiedAccentDataset:
         self.cache_dir = Path(cache_dir).expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
+        # Import SAA loader if available
+        try:
+            from saa_loader import SAALoader
+            saa_loader = SAALoader(data_root, cache_dir)
+        except ImportError:
+            logger.warning("SAA loader not available")
+            saa_loader = None
+        
+        
+        # Import SBCSAE loader if available
+        try:
+            from sbcsae_loader import SBCSAELoader
+            sbcsae_loader = SBCSAELoader(data_root, cache_dir)
+        except ImportError:
+            logger.warning("SBCSAE loader not available")
+            sbcsae_loader = None
+        
+        # Import VoxCeleb loader if available
+        try:
+            from voxceleb_loader import VoxCelebLoader
+            voxceleb_loader = VoxCelebLoader(data_root, cache_dir)
+        except ImportError:
+            logger.warning("VoxCeleb loader not available")
+            voxceleb_loader = None
+        
         self.loaders = {
             'TIMIT': TIMITLoader(data_root, cache_dir),
             'CommonVoice': CommonVoiceLoader(data_root, cache_dir),
             'CORAAL': CORAALLoader(data_root, cache_dir),
         }
+        
+        # Add SAA loader if available
+        if saa_loader:
+            self.loaders['SAA'] = saa_loader
+        
+        # Add SBCSAE loader if available
+        if sbcsae_loader:
+            self.loaders['SBCSAE'] = sbcsae_loader
         
         self.all_samples: List[UnifiedSample] = []
         self.metadata_file = self.cache_dir / 'unified_metadata.json'

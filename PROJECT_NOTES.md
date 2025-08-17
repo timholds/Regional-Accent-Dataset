@@ -31,8 +31,20 @@ Understanding the relationship between model size and dataset size is crucial fo
 - The original Wav2Vec2 had 260x more data but only 5x more parameters
 
 ## Models to train
-Frozen wav2vec with a classifier head on top to check if we can map the features directly to a linearly seperable space
+Frozen wav2vec with a classifier head on top
+- to check if we can map the features directly to a linearly seperable space
+- Model: Wav2Vec2-base with frozen encoder, only training classifier head
+  - Trainable params: Only 1,542 params (0.0016% of 94.5M total) - just the final linear layer
+  - Dataset: 4,480 training samples, 910 val/test samples each
+  - Current performance: 28.4% test accuracy (vs 16.7% random chance for 6 classes)
+  - Hyperparameters:
+    - Batch size: 16
+    - Learning rate: 3e-5
+    - No gradient accumulation (steps=1)
+    - No LoRA currently used
+    - Class weighting enabled with power=0.5
+
 Unfrozen wav2vec with a classifier head on top
 LoRA on top of frozen wav2vec
-
+Fine tune last layers of wav2vec along with classifier head
 

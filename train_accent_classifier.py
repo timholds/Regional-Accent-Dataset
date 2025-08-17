@@ -100,8 +100,7 @@ def parse_args():
     parser.add_argument("--model_name", type=str, 
                        default="facebook/wav2vec2-base",
                        help="Pretrained model to use")
-    parser.add_argument("--num_labels", type=int, default=6,
-                       help="Number of accent classes")
+    # num_labels is determined from the dataset config, not user input
     parser.add_argument("--use_lora", action="store_true",
                        help="Use LoRA for efficient fine-tuning")
     
@@ -110,7 +109,7 @@ def parse_args():
                        help="Training batch size")
     parser.add_argument("--eval_batch_size", type=int, default=32,
                        help="Evaluation batch size")
-    parser.add_argument("--num_epochs", type=int, default=10,
+    parser.add_argument("--epochs", type=int, default=10,
                        help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=3e-5,  # Lower for stable training
                        help="Learning rate")
@@ -126,6 +125,8 @@ def parse_args():
                        help="Dropout rate for LoRA and model layers")
     parser.add_argument("--lora_r", type=int, default=16,
                        help="LoRA rank (dimension of adaptation)")
+    parser.add_argument("--hidden_dim", type=int, default=512,
+                       help="Hidden dimension for 2-layer classifier head")
     parser.add_argument("--class_weight_power", type=float, default=0.5,
                        help="Power for class weight calculation (0=no weighting, 0.5=sqrt, 1=linear)")
     parser.add_argument("--class_weight_max", type=float, default=3.0,
@@ -213,6 +214,105 @@ def load_prepared_dataset(dataset_path: str, processor):
     return train_dataset, val_dataset, test_dataset, config, metadata
 
 
+def print_model_summary(model, args=None):
+    """Print model parameter summary"""
+    print("\n" + "="*60)
+    print("MODEL PARAMETER SUMMARY")
+    print("="*60)
+    
+    total_params = 0
+    trainable_params = 0
+    frozen_params = 0
+    
+    # Group parameters by component
+    components = {
+        'feature_extractor': 0,
+        'feature_projection': 0,
+        'encoder': 0,
+        'projector': 0,
+        'classifier': 0,
+        'lora': 0,
+        'other': 0
+    }
+    
+    trainable_components = {
+        'feature_extractor': 0,
+        'feature_projection': 0,
+        'encoder': 0,
+        'projector': 0,
+        'classifier': 0,
+        'lora': 0,
+        'other': 0
+    }
+    
+    for name, param in model.named_parameters():
+        param_count = param.numel()
+        total_params += param_count
+        
+        if param.requires_grad:
+            trainable_params += param_count
+            is_trainable = True
+        else:
+            frozen_params += param_count
+            is_trainable = False
+        
+        # Categorize parameters
+        if 'feature_extractor' in name:
+            components['feature_extractor'] += param_count
+            if is_trainable:
+                trainable_components['feature_extractor'] += param_count
+        elif 'feature_projection' in name:
+            components['feature_projection'] += param_count
+            if is_trainable:
+                trainable_components['feature_projection'] += param_count
+        elif 'encoder' in name:
+            components['encoder'] += param_count
+            if is_trainable:
+                trainable_components['encoder'] += param_count
+        elif 'projector' in name:
+            components['projector'] += param_count
+            if is_trainable:
+                trainable_components['projector'] += param_count
+        elif 'classifier' in name:
+            components['classifier'] += param_count
+            if is_trainable:
+                trainable_components['classifier'] += param_count
+        elif 'lora' in name.lower():
+            components['lora'] += param_count
+            if is_trainable:
+                trainable_components['lora'] += param_count
+        else:
+            components['other'] += param_count
+            if is_trainable:
+                trainable_components['other'] += param_count
+    
+    # Print component breakdown
+    print("\nComponent breakdown:")
+    for comp_name, comp_params in components.items():
+        if comp_params > 0:
+            trainable = trainable_components[comp_name]
+            percentage = (comp_params / total_params) * 100
+            status = f"({trainable:,} trainable)" if trainable > 0 else "(frozen)"
+            print(f"  {comp_name:20s}: {comp_params:12,} params ({percentage:5.2f}%) {status}")
+    
+    print("\nOverall summary:")
+    print(f"  Total parameters:      {total_params:,}")
+    print(f"  Trainable parameters:  {trainable_params:,} ({(trainable_params/total_params)*100:.2f}%)")
+    print(f"  Frozen parameters:     {frozen_params:,} ({(frozen_params/total_params)*100:.2f}%)")
+    
+    # Print classifier architecture if available
+    if hasattr(model, 'classifier'):
+        print("\nClassifier architecture:")
+        print(f"  {model.classifier}")
+    
+    if args and hasattr(args, 'use_lora') and args.use_lora:
+        print(f"\nLoRA configuration:")
+        print(f"  Rank (r): {args.lora_r}")
+        print(f"  Dropout: {args.dropout_rate}")
+    
+    print("="*60 + "\n")
+
+
 def setup_model(args, num_labels):
     """Setup model with optional LoRA"""
     print(f"Loading model: {args.model_name}")
@@ -224,13 +324,36 @@ def setup_model(args, num_labels):
         gradient_checkpointing=False  # Disable to avoid potential issues
     )
     
+    # Bypass the projector and use full encoder output (768 dims)
+    hidden_size = model.config.hidden_size  # Should be 768 for wav2vec2-base
+    
+    # Replace both projector and classifier with our custom MLP
+    # Architecture: 768 -> hidden_dim -> hidden_dim//2 -> num_classes
+    hidden_dim = args.hidden_dim
+    
+    # Create new classifier that takes encoder output directly
+    new_classifier = nn.Sequential(
+        nn.Linear(hidden_size, hidden_dim),
+        nn.ReLU(),
+        nn.Dropout(args.dropout_rate),
+        nn.Linear(hidden_dim, hidden_dim // 2),
+        nn.ReLU(),
+        nn.Dropout(args.dropout_rate),
+        nn.Linear(hidden_dim // 2, num_labels)
+    )
+    
+    # Replace the projector with identity (bypass it)
+    model.projector = nn.Identity()
+    
+    # Replace classifier with our new architecture
+    model.classifier = new_classifier
+    
     # Freeze the entire feature extractor and encoder
-    # Only the classifier head will be trainable (~1,500 params for 6 classes)
     model.freeze_feature_encoder()
     
-    # Freeze ALL transformer layers - we only want to train the classifier
+    # Freeze ALL transformer layers - we only want to train the classifier and projector
     for name, param in model.named_parameters():
-        if "classifier" not in name:
+        if "classifier" not in name and "projector" not in name:
             param.requires_grad = False
     
     if args.use_lora:
@@ -524,11 +647,14 @@ def main():
     model = setup_model(args, num_labels)
     model.to(device)
     
+    # Print model summary
+    print_model_summary(model, args)
+    
     # Setup optimizer and scheduler
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     
     # Calculate total steps correctly accounting for gradient accumulation
-    total_steps = len(train_loader) * args.num_epochs // args.gradient_accumulation_steps
+    total_steps = len(train_loader) * args.epochs // args.gradient_accumulation_steps
     # Make warmup proportional to epoch length (10% of first epoch by default)
     steps_per_epoch = len(train_loader) // args.gradient_accumulation_steps
     warmup_steps = min(args.warmup_steps, max(10, steps_per_epoch // 10))
@@ -541,11 +667,11 @@ def main():
     print(f"\nScheduler setup: total_steps={total_steps}, warmup_steps={warmup_steps}")
     
     # Training loop
-    print(f"\nStarting training for {args.num_epochs} epochs...")
+    print(f"\nStarting training for {args.epochs} epochs...")
     best_val_accuracy = 0
     
-    for epoch in range(args.num_epochs):
-        print(f"\nEpoch {epoch + 1}/{args.num_epochs}")
+    for epoch in range(args.epochs):
+        print(f"\nEpoch {epoch + 1}/{args.epochs}")
         
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, scheduler, device, args, class_weights)
