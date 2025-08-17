@@ -601,6 +601,16 @@ class CORAALLoader(BaseDatasetLoader):
                     'https://lingtools.uoregon.edu/coraal/dca/2018.10.06/DCA_audio_part01_2018.10.06.tar.gz',
                     'https://lingtools.uoregon.edu/coraal/dca/2018.10.06/DCA_audio_part02_2018.10.06.tar.gz'
                 ]},
+        'DCB': {'city': 'Washington DC', 'year': '2016', 'region': 'Mid-Atlantic',
+                'audio_urls': [
+                    'https://lingtools.uoregon.edu/coraal/dcb/2018.10.06/DCB_audio_part01_2018.10.06.tar.gz'
+                ]},
+        'PRV': {'city': 'Princeville NC', 'year': '2004', 'region': 'South Atlantic',
+                'audio_urls': [
+                    'https://lingtools.uoregon.edu/coraal/prv/2018.10.06/PRV_audio_part01_2018.10.06.tar.gz'
+                ]},
+        'VLD': {'city': 'Valdosta GA', 'year': '2017', 'region': 'Deep South',
+                'audio_urls': []},  # No downloadable files found yet
         'ROC': {'city': 'Rochester NY', 'year': '2016-2018', 'region': 'New York Metropolitan',
                 'audio_urls': [
                     'https://lingtools.uoregon.edu/coraal/roc/2020.05/ROC_audio_part01_2020.05.tar.gz',
@@ -610,7 +620,7 @@ class CORAALLoader(BaseDatasetLoader):
                 'audio_urls': [
                     'https://lingtools.uoregon.edu/coraal/les/2021.04/LES_audio_part01_2021.04.tar.gz'
                 ]},
-        'DTA': {'city': 'Detroit', 'year': '1966', 'region': 'Midwest',
+        'DTA': {'city': 'Detroit', 'year': '1966', 'region': 'Upper Midwest',
                 'audio_urls': [
                     'https://lingtools.uoregon.edu/coraal/dta/2023.06/DTA_audio_part01_2023.06.tar.gz',
                     'https://lingtools.uoregon.edu/coraal/dta/2023.06/DTA_audio_part02_2023.06.tar.gz'

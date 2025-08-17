@@ -28,8 +28,7 @@ REGIONS = [
     "Mid-Atlantic",
     "South Atlantic",
     "Deep South",
-    "Upper Midwest",
-    "Lower Midwest",
+    "Midwest",
     "West"
 ]
 

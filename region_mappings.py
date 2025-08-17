@@ -36,8 +36,7 @@ class MediumRegion(Enum):
     MID_ATLANTIC = "Mid-Atlantic"  # dr3 partial
     SOUTH_ATLANTIC = "South Atlantic"  # dr5 partial
     DEEP_SOUTH = "Deep South"  # dr5 partial
-    UPPER_MIDWEST = "Upper Midwest"  # dr2
-    LOWER_MIDWEST = "Lower Midwest"  # dr3 partial
+    MIDWEST = "Midwest"  # dr2 and dr3 partial (merged Upper and Lower)
     WEST = "West"  # dr7
 
 
@@ -133,15 +132,13 @@ MEDIUM_MAPPINGS: Dict[str, MediumRegion] = {
     'LA': MediumRegion.DEEP_SOUTH, 'AR': MediumRegion.DEEP_SOUTH,
     'TN': MediumRegion.DEEP_SOUTH, 'KY': MediumRegion.DEEP_SOUTH,
     
-    # Upper Midwest
-    'WI': MediumRegion.UPPER_MIDWEST, 'MI': MediumRegion.UPPER_MIDWEST,
-    'MN': MediumRegion.UPPER_MIDWEST, 'ND': MediumRegion.UPPER_MIDWEST,
-    'SD': MediumRegion.UPPER_MIDWEST, 'IL': MediumRegion.UPPER_MIDWEST,  # Northern IL
-    
-    # Lower Midwest
-    'OH': MediumRegion.LOWER_MIDWEST, 'IN': MediumRegion.LOWER_MIDWEST,
-    'MO': MediumRegion.LOWER_MIDWEST, 'IA': MediumRegion.LOWER_MIDWEST,
-    'NE': MediumRegion.LOWER_MIDWEST, 'KS': MediumRegion.LOWER_MIDWEST,
+    # Midwest (merged Upper and Lower)
+    'WI': MediumRegion.MIDWEST, 'MI': MediumRegion.MIDWEST,
+    'MN': MediumRegion.MIDWEST, 'ND': MediumRegion.MIDWEST,
+    'SD': MediumRegion.MIDWEST, 'IL': MediumRegion.MIDWEST,
+    'OH': MediumRegion.MIDWEST, 'IN': MediumRegion.MIDWEST,
+    'MO': MediumRegion.MIDWEST, 'IA': MediumRegion.MIDWEST,
+    'NE': MediumRegion.MIDWEST, 'KS': MediumRegion.MIDWEST,
     
     # West (including TX, OK)
     'MT': MediumRegion.WEST, 'ID': MediumRegion.WEST,
