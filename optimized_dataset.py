@@ -126,14 +126,21 @@ class OptimizedAccentDataset(Dataset):
         # Load audio with caching
         audio = self._load_audio_cached(sample)
         
-        # Process audio
+        # Ensure consistent audio length (pad or truncate to max_length)
+        max_length_samples = int(self.target_sample_rate * 10)  # 10 seconds max (matches chunking strategy)
+        
+        if len(audio) > max_length_samples:
+            audio = audio[:max_length_samples]  # Truncate
+        elif len(audio) < max_length_samples:
+            audio = np.pad(audio, (0, max_length_samples - len(audio)))  # Pad with zeros
+        
+        # Process audio (now guaranteed to be consistent length)
         inputs = self.processor(
             audio,
             sampling_rate=self.target_sample_rate,
             return_tensors="pt",
-            padding=True,
-            max_length=int(self.target_sample_rate * 30),  # Max 30 seconds
-            truncation=True
+            padding=False,  # No need to pad since we already did it
+            truncation=False  # No need to truncate since we already did it
         )
         
         # Create attention mask manually (Wav2Vec2Processor doesn't provide one)
