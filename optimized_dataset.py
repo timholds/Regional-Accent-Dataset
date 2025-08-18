@@ -91,14 +91,13 @@ class OptimizedAccentDataset(Dataset):
         samples: List[UnifiedSample],
         processor,
         label_mapping: Optional[Dict[str, int]] = None,
-        pre_chunked: bool = False,
         cache_size: int = 200,
-        target_sample_rate: int = 16000
+        **kwargs  # Accept and ignore other parameters for compatibility
     ):
         self.samples = samples
         self.processor = processor
-        self.pre_chunked = pre_chunked
-        self.target_sample_rate = target_sample_rate
+        self.pre_chunked = kwargs.get('pre_chunked', False)
+        self.target_sample_rate = kwargs.get('target_sample_rate', 16000)
         
         # Setup audio cache
         self.audio_cache = AudioCache(cache_size)
@@ -152,7 +151,7 @@ class OptimizedAccentDataset(Dataset):
         return {
             'input_values': inputs.input_values.squeeze(),
             'attention_mask': attention_mask,
-            'labels': torch.tensor(label, dtype=torch.long),
+            'labels': torch.as_tensor(label, dtype=torch.long),
             'sample_id': sample.sample_id
         }
     
@@ -207,5 +206,5 @@ class OptimizedAccentDataset(Dataset):
     def log_cache_stats(self):
         """Log cache statistics"""
         stats = self.get_cache_stats()
-        logger.info(f"Audio cache stats: {stats['hits']} hits, {stats['misses']} misses, "
-                   f"{stats['hit_rate']:.1%} hit rate, {stats['size']}/{stats['capacity']} capacity")
+        logger.info(f"Cache: {stats['hits']} hits, {stats['misses']} misses, "
+                   f"{stats['hit_rate']:.1%} hit rate, {stats['size']}/{stats['capacity']}")

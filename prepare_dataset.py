@@ -109,11 +109,6 @@ def parse_args():
         default=10.0,
         help="Maximum duration before chunking (default: 10.0)"
     )
-    parser.add_argument(
-        "--disable_chunking", 
-        action="store_true",
-        help="Disable chunking of long audio files (ALL files get chunk metadata regardless)"
-    )
     
     # Processing arguments
     parser.add_argument(
@@ -406,24 +401,15 @@ def main():
     for region, count in sorted(region_counts.items()):
         print(f"  - {region}: {count} samples")
     
-    # Apply chunking to ALL audio files (now enabled by default)
-    if not args.disable_chunking:
-        chunked_samples = chunk_all_audio_samples(
-            all_samples,
-            chunk_duration=args.chunk_duration,
-            chunk_overlap=args.chunk_overlap,
-            min_duration=args.min_chunk_duration,
-            max_duration=args.max_chunk_duration
-        )
-        print(f"✓ {len(chunked_samples)} samples after chunking (all samples have chunk metadata)")
-    else:
-        # Even when chunking is disabled, add basic chunk metadata
-        for sample in all_samples:
-            if not hasattr(sample, 'chunk_start_sample'):
-                sample.chunk_start_sample = 0
-                sample.chunk_end_sample = int(16000 * (sample.duration or 3.0))
-        chunked_samples = all_samples
-        print("✓ Chunking disabled (but basic chunk metadata added)")
+    # Apply chunking to ALL audio files
+    chunked_samples = chunk_all_audio_samples(
+        all_samples,
+        chunk_duration=args.chunk_duration,
+        chunk_overlap=args.chunk_overlap,
+        min_duration=args.min_chunk_duration,
+        max_duration=args.max_chunk_duration
+    )
+    print(f"✓ {len(chunked_samples)} samples after chunking (all samples have chunk metadata)")
     
     # Apply filtering
     filtered_samples = filter_samples(chunked_samples, args)
@@ -546,6 +532,69 @@ def main():
     assert len(val_speakers & test_speakers) == 0, "Speaker overlap between val and test!"
     print("✓ No speaker overlap between splits")
     
+    # Calculate and display duration statistics before saving
+    def calculate_duration_stats(samples):
+        """Calculate duration statistics for a set of samples"""
+        total_duration = 0
+        durations_by_region = {}
+        durations_by_dataset = {}
+        
+        for s in samples:
+            # Calculate actual chunk duration
+            if hasattr(s, 'chunk_start_sample') and hasattr(s, 'chunk_end_sample'):
+                duration = (s.chunk_end_sample - s.chunk_start_sample) / 16000.0
+            elif s.duration:
+                duration = s.duration
+            else:
+                duration = 0
+            
+            total_duration += duration
+            
+            # By region
+            if s.region_label not in durations_by_region:
+                durations_by_region[s.region_label] = 0
+            durations_by_region[s.region_label] += duration
+            
+            # By dataset
+            if s.dataset_name not in durations_by_dataset:
+                durations_by_dataset[s.dataset_name] = 0
+            durations_by_dataset[s.dataset_name] += duration
+        
+        return total_duration, durations_by_region, durations_by_dataset
+    
+    # Format duration for display
+    def format_duration(seconds):
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:05.2f}"
+    
+    # Calculate durations
+    total_duration, durations_by_region, durations_by_dataset = calculate_duration_stats(filtered_samples)
+    
+    # Display duration statistics
+    print(f"\n📊 Duration Statistics:")
+    print(f"   Total audio: {format_duration(total_duration)} ({total_duration/3600:.1f} hours)")
+    
+    print(f"\n   Duration by region (actual audio time):")
+    df_all = pd.DataFrame([s.to_dict() for s in filtered_samples])
+    region_sample_counts = df_all['region_label'].value_counts().to_dict()
+    
+    for region in sorted(durations_by_region.keys()):
+        duration = durations_by_region[region]
+        samples = region_sample_counts.get(region, 0)
+        avg_dur = duration / samples if samples > 0 else 0
+        pct = (duration / total_duration * 100) if total_duration > 0 else 0
+        print(f"     {region:20s}: {format_duration(duration)} ({pct:5.1f}%) - {samples:6d} chunks, avg {avg_dur:.1f}s/chunk")
+    
+    print(f"\n   Duration by dataset:")
+    dataset_sample_counts = df_all['dataset_name'].value_counts().to_dict()
+    for dataset in sorted(durations_by_dataset.keys()):
+        duration = durations_by_dataset[dataset]
+        samples = dataset_sample_counts.get(dataset, 0)
+        pct = (duration / total_duration * 100) if total_duration > 0 else 0
+        print(f"     {dataset:20s}: {format_duration(duration)} ({pct:5.1f}%) - {samples:6d} chunks")
+    
     # Save dataset
     print(f"\nSaving dataset to {output_path}...")
     output_path.mkdir(parents=True, exist_ok=True)
@@ -558,17 +607,25 @@ def main():
     val_df.to_csv(output_path / "val.csv", index=False)
     test_df.to_csv(output_path / "test.csv", index=False)
     
+    # Recalculate durations for metadata (already calculated above for display)
+    # total_duration, durations_by_region, durations_by_dataset already calculated
+    train_duration, train_durations_by_region, _ = calculate_duration_stats(train_samples)
+    val_duration, val_durations_by_region, _ = calculate_duration_stats(val_samples)
+    test_duration, test_durations_by_region, _ = calculate_duration_stats(test_samples)
+    
+    # region_sample_counts and dataset_sample_counts already calculated above
+    
     # Save metadata
     metadata = {
         "dataset_name": args.dataset_name,
         "created_at": datetime.now().isoformat(),
-        "chunking_enabled": not args.disable_chunking,
+        "chunking_enabled": True,
         "chunking_params": {
             "chunk_duration": args.chunk_duration,
             "chunk_overlap": args.chunk_overlap,
             "min_chunk_duration": args.min_chunk_duration,
             "max_chunk_duration": args.max_chunk_duration
-        } if not args.disable_chunking else None,
+        },
         "args": vars(args),
         "statistics": {
             "total_samples": len(filtered_samples),
@@ -581,8 +638,43 @@ def main():
                 "val": len(val_speakers),
                 "test": len(test_speakers)
             },
+            "total_duration": {
+                "seconds": total_duration,
+                "formatted": format_duration(total_duration),
+                "train_seconds": train_duration,
+                "train_formatted": format_duration(train_duration),
+                "val_seconds": val_duration,
+                "val_formatted": format_duration(val_duration),
+                "test_seconds": test_duration,
+                "test_formatted": format_duration(test_duration)
+            },
+            "duration_by_region": {
+                region: {
+                    "seconds": duration,
+                    "formatted": format_duration(duration),
+                    "percentage": (duration / total_duration * 100) if total_duration > 0 else 0,
+                    "hours": duration / 3600
+                }
+                for region, duration in sorted(durations_by_region.items())
+            },
+            "duration_by_dataset": {
+                dataset: {
+                    "seconds": duration,
+                    "formatted": format_duration(duration),
+                    "percentage": (duration / total_duration * 100) if total_duration > 0 else 0,
+                    "hours": duration / 3600
+                }
+                for dataset, duration in sorted(durations_by_dataset.items())
+            },
+            "samples_by_region": region_sample_counts,
+            "samples_by_dataset": dataset_sample_counts,
+            "average_duration_by_region": {
+                region: durations_by_region[region] / region_sample_counts[region]
+                for region in region_sample_counts.keys()
+                if region in durations_by_region
+            },
             "datasets_included": args.datasets,
-            "region_distribution": pd.DataFrame([s.to_dict() for s in filtered_samples])['region_label'].value_counts().to_dict()
+            "region_distribution": region_sample_counts  # This is the chunked sample distribution
         },
         "label_mapping": {
             region: idx for idx, region in enumerate(

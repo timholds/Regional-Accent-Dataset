@@ -124,13 +124,13 @@ MEDIUM_MAPPINGS: Dict[str, MediumRegion] = {
     
     # South Atlantic
     'VA': MediumRegion.SOUTH_ATLANTIC, 'NC': MediumRegion.SOUTH_ATLANTIC,
-    'SC': MediumRegion.SOUTH_ATLANTIC, 'GA': MediumRegion.SOUTH_ATLANTIC,
-    'FL': MediumRegion.SOUTH_ATLANTIC,
+    'SC': MediumRegion.SOUTH_ATLANTIC, 'FL': MediumRegion.SOUTH_ATLANTIC,
     
     # Deep South
     'AL': MediumRegion.DEEP_SOUTH, 'MS': MediumRegion.DEEP_SOUTH,
     'LA': MediumRegion.DEEP_SOUTH, 'AR': MediumRegion.DEEP_SOUTH,
     'TN': MediumRegion.DEEP_SOUTH, 'KY': MediumRegion.DEEP_SOUTH,
+    'GA': MediumRegion.DEEP_SOUTH,
     
     # Midwest (merged Upper and Lower)
     'WI': MediumRegion.MIDWEST, 'MI': MediumRegion.MIDWEST,

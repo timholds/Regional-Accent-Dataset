@@ -164,7 +164,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=16,
                        help="Training batch size")
     parser.add_argument("--eval_batch_size", type=int, default=None,
-                       help="Evaluation batch size (default: 2x training batch size)")
+                       help="Evaluation batch size (default: training batch size)")
     parser.add_argument("--epochs", type=int, default=10,
                        help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=3e-5,  # Lower for stable training
@@ -696,8 +696,8 @@ def main():
     
     # Set eval batch size if not specified (default to 4x training batch size for faster eval)
     if args.eval_batch_size is None:
-        args.eval_batch_size = args.batch_size * 4
-        print(f"\nSetting eval batch size to {args.eval_batch_size} (4x training batch size)")
+        args.eval_batch_size = args.batch_size 
+        print(f"\nSetting eval batch size to {args.eval_batch_size} (same as training batch size)")
     
     # Determine optimal number of workers - REDUCED to prevent resource exhaustion
     import multiprocessing
@@ -725,7 +725,7 @@ def main():
         shuffle=False, 
         collate_fn=collate_fn,
         num_workers=num_workers,
-        pin_memory=torch.cuda.is_available() and args.eval_batch_size <= 32,
+        pin_memory=torch.cuda.is_available() and args.eval_batch_size <= 64,
         prefetch_factor=2 if num_workers > 0 else None,
         persistent_workers=num_workers > 0  # Keep workers alive if using workers
     )
@@ -736,7 +736,7 @@ def main():
         shuffle=False, 
         collate_fn=collate_fn,
         num_workers=num_workers,
-        pin_memory=torch.cuda.is_available() and args.eval_batch_size <= 32,
+        pin_memory=torch.cuda.is_available() and args.eval_batch_size <= 64,
         prefetch_factor=2 if num_workers > 0 else None,
         persistent_workers=num_workers > 0  # Keep workers alive if using workers
     )
@@ -755,27 +755,41 @@ def main():
     print(f"\nNumber of accent classes: {num_labels}")
     print(f"Classes: {', '.join(label_names)}")
     
-    # Calculate class weights for imbalanced data
-    print("\nCalculating class weights...")
-    # Use the already loaded train_dataset samples instead of re-reading CSV
-    train_labels = [sample.region_label for sample in train_dataset.samples]
-    class_counts = pd.Series(train_labels).value_counts()
-    total_samples = len(train_labels)
+    # Calculate class weights for imbalanced data based on total duration
+    print("\nCalculating class weights based on total duration per region...")
     
-    # Calculate class weights based on configurable power parameter
+    # Calculate total duration per region
+    region_durations = {}
+    region_counts = {}
+    for sample in train_dataset.samples:
+        region = sample.region_label
+        # Use duration if available, otherwise estimate based on chunk size (7.5s default)
+        duration = sample.duration if hasattr(sample, 'duration') and sample.duration else 7.5
+        
+        if region not in region_durations:
+            region_durations[region] = 0
+            region_counts[region] = 0
+        region_durations[region] += duration
+        region_counts[region] += 1
+    
+    # Calculate class weights based on total duration
     class_weights = []
-    max_count = class_counts.max()
+    max_duration = max(region_durations.values())
+    
     for label_name in label_names:
-        count = class_counts.get(label_name, 1)  # Avoid division by zero
+        duration = region_durations.get(label_name, 1.0)  # Avoid division by zero
+        count = region_counts.get(label_name, 0)
+        
         # Use configurable power for balancing (0=no weighting, 0.5=sqrt, 1=linear)
         if args.class_weight_power > 0:
-            weight = (max_count / count) ** args.class_weight_power
+            weight = (max_duration / duration) ** args.class_weight_power
             # Cap at max weight to prevent instability
             weight = min(weight, args.class_weight_max)
         else:
             weight = 1.0  # No weighting if power is 0
+        
         class_weights.append(weight)
-        print(f"  {label_name}: count={count}, weight={weight:.3f}")
+        print(f"  {label_name}: chunks={count}, total_duration={duration:.1f}s, weight={weight:.3f}")
     
     class_weights = torch.FloatTensor(class_weights)
     print(f"Class weights: {class_weights}")

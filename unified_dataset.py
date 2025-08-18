@@ -27,7 +27,6 @@ from urllib.parse import urlparse
 import librosa
 
 from region_mappings import get_region_for_state, MediumRegion, MEDIUM_MAPPINGS
-from audio_segmentation import segment_audio_smart, process_and_segment_audio
 
 
 # Configure logging
@@ -94,90 +93,6 @@ class BaseDatasetLoader(ABC):
         """Generate unique sample ID"""
         return f"{dataset_name}_{speaker_id}_{utterance_id}"
     
-    def _process_audio_segments(self, audio_path: str, sample_base: UnifiedSample,
-                               target_duration: float = 7.5) -> List[UnifiedSample]:
-        """
-        Process audio file and create segmented samples if needed.
-        
-        Args:
-            audio_path: Path to audio file
-            sample_base: Base sample with metadata to copy
-            target_duration: Target segment duration (default 7.5s)
-        
-        Returns:
-            List of UnifiedSample objects (one per segment)
-        """
-        try:
-            import librosa
-            
-            # Load audio and check duration
-            audio, sr = librosa.load(audio_path, sr=16000)
-            duration = len(audio) / sr
-            
-            # If audio is short enough, return single sample
-            if duration <= 10.0:
-                sample = UnifiedSample(
-                    sample_id=sample_base.sample_id,
-                    dataset_name=sample_base.dataset_name,
-                    speaker_id=sample_base.speaker_id,
-                    audio_path=audio_path,
-                    transcript=sample_base.transcript,
-                    region_label=sample_base.region_label,
-                    original_accent_label=sample_base.original_accent_label,
-                    state=sample_base.state,
-                    gender=sample_base.gender,
-                    age=sample_base.age,
-                    native_language=sample_base.native_language,
-                    duration=duration,
-                    sample_rate=16000,
-                    is_validated=sample_base.is_validated,
-                    quality_score=sample_base.quality_score
-                )
-                return [sample]
-            
-            # Segment longer audio
-            segments = segment_audio_smart(
-                audio, sr=16000,
-                target_duration=target_duration,
-                min_duration=5.0,
-                max_duration=10.0,
-                overlap_ratio=0.2
-            )
-            
-            segmented_samples = []
-            for i, (segment_audio, start_sample, end_sample) in enumerate(segments):
-                segment_duration = len(segment_audio) / sr
-                segment_id = f"{sample_base.sample_id}_seg{i:03d}"
-                
-                sample = UnifiedSample(
-                    sample_id=segment_id,
-                    dataset_name=sample_base.dataset_name,
-                    speaker_id=sample_base.speaker_id,
-                    audio_path=audio_path,  # Keep original path
-                    transcript=sample_base.transcript,
-                    region_label=sample_base.region_label,
-                    original_accent_label=sample_base.original_accent_label,
-                    state=sample_base.state,
-                    gender=sample_base.gender,
-                    age=sample_base.age,
-                    native_language=sample_base.native_language,
-                    duration=segment_duration,
-                    sample_rate=16000,
-                    is_validated=sample_base.is_validated,
-                    quality_score=sample_base.quality_score
-                )
-                # Store segment info for later extraction
-                sample._segment_start = start_sample
-                sample._segment_end = end_sample
-                segmented_samples.append(sample)
-            
-            return segmented_samples
-            
-        except Exception as e:
-            logger.warning(f"Failed to segment {audio_path}: {e}. Returning single sample.")
-            # Fallback to single sample
-            sample_base.audio_path = audio_path
-            return [sample_base]
     
     def _map_to_region(self, state: str = None, city: str = None, 
                       accent_description: str = None) -> Tuple[str, str]:
@@ -773,12 +688,8 @@ class CORAALLoader(BaseDatasetLoader):
                     is_validated=True  # CORAAL is professionally curated
                 )
                 
-                # Process and segment the audio (CORAAL files are long interviews)
-                segmented_samples = self._process_audio_segments(str(audio_file), base_sample)
-                unified_samples.extend(segmented_samples)
-                
-                if len(segmented_samples) > 1:
-                    logger.info(f"  Segmented {filename} into {len(segmented_samples)} chunks")
+                # Add single sample - chunking will be handled by prepare_dataset.py
+                unified_samples.append(base_sample)
         
         self.samples = unified_samples
         logger.info(f"Loaded {len(unified_samples)} samples from CORAAL")
@@ -1036,7 +947,7 @@ class UnifiedAccentDataset:
         # Regional balance analysis
         region_counts = df['region_label'].value_counts()
         total = len(df)
-        stats['region_percentages'] = {
+        stats['filtered_chunk_distribution'] = {
             region: f"{(count/total*100):.1f}%" 
             for region, count in region_counts.items()
         }

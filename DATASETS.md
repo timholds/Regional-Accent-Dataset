@@ -12,6 +12,26 @@ The pipeline automatically handles long-form audio (interviews, conversations) t
 - **Efficient**: Uses soundfile to read audio metadata without loading full files
 - **Random selection**: For multi-chunk files, randomly selects chunks each epoch for variety
 
+`--chunk_duration 7.5 (default)`
+  - Perfect for wav2vec2: 7.5s × 16kHz = 120k samples fits well in model context
+  - Training efficiency: Consistent batch sizes, good gradient updates
+  - Not too short: Captures enough accent features
+  - Not too long: Avoids memory issues
+
+`--chunk_overlap 2.5 (default)`
+- 33% overlap: Ensures no accent features are lost at boundaries
+- More training data: Creates more diverse samples from long audio
+- Smooth transitions: Helps model learn continuous speech patterns
+
+`--min_chunk_duration 5.0 (default)`
+- Minimum viable: 5 seconds is enough for accent identification
+- Filters noise: Removes very short, likely low-quality segments
+
+`--max_chunk_duration 10.0 (default)`
+- Memory limit: Prevents extremely long samples that cause OOM
+- Forces chunking: Files >10s get split into manageable pieces
+
+
 ## Overview
 
 This document describes all datasets supported by the unified accent classification pipeline. Each dataset can be included via the `prepare_dataset.py` script.
@@ -166,22 +186,25 @@ All datasets map to these 8 US regions:
 
 ## 3. CommonVoice - Mozilla Common Voice
 
-### ⚠️ CRITICAL DATA QUALITY ISSUES - NOT RECOMMENDED
+### ✅ FILTERED APPROACH NOW AVAILABLE
 
-**Based on analysis of REAL CommonVoice v22.0 data (1.85M validated samples):**
+**FilteredCommonVoice Loader**: A new filtered loader (`commonvoice_filtered_loader.py`) has been implemented that:
+- **Extracts only the ~5,558 samples with specific regional labels** 
+- **Filters out all 441,218 generic "United States English" samples**
+- **Applies quality filtering**: min_upvotes=2, max_downvotes=0
+- **Successfully contributes to training** with verified regional samples
 
-#### The Numbers Don't Lie:
-- **Total samples**: 1,855,218 
+#### Original Dataset Analysis (v22.0):
+- **Total samples**: 1,855,218 validated clips
 - **US-labeled samples**: 441,218 (23.8%)
-- **Samples mappable to specific US regions**: 5,893 (0.32%)
-- **Samples with generic "United States English"**: 450,080 (99%+ of US samples)
+- **Regionally-specific samples**: 5,558 after filtering (0.3%)
+- **Generic labels filtered out**: 441,218 samples
 
-#### Fatal Issues for Regional Accent Classification:
-1. **No location metadata** - Zero state/city data, only user-reported accent labels
-2. **99%+ generic labels** - Almost all US samples just say "United States English"
-3. **0.32% regional specificity** - Only 5,893 of 1.85M samples map to specific regions
-4. **Extreme label inconsistency** - "Midwest" alone has 42 different label variants
-5. **No verification possible** - Cannot validate self-reported labels without location data
+#### Why the Filtered Approach Works:
+1. **Strict regional matching** - Only accepts samples with explicit regional indicators
+2. **Quality thresholds** - Uses upvote/downvote data to filter quality
+3. **No generic defaults** - Rejects all "United States English" without regional info
+4. **Verified in training** - Successfully used in latest prepared datasets
 
 ### Overview
 - **Source**: Mozilla Foundation  
@@ -216,14 +239,20 @@ All datasets map to these 8 US regions:
 
 **Note**: No location metadata (state/city) available
 
-### Regional Mapping Problems
-- **Current approach**: Parses `accent` field for US location keywords
-- **Major issues**:
-  - Generic labels ("American", "US English") default to 'West' region
-  - No verification of self-reported accents
-  - Inconsistent labeling (e.g., "US", "united states", "american" all different)
-  - Many speakers don't provide accent information
-  - When provided, accent labels often don't map to specific regions
+### Regional Mapping Solution
+- **FilteredCommonVoice approach**: Strict pattern matching for regional keywords
+- **Filtered samples by region** (from latest run):
+  - Midwest: ~2,200 samples
+  - Deep South: ~1,500 samples  
+  - West: ~1,200 samples
+  - New York Metropolitan: ~400 samples
+  - Mid-Atlantic: ~150 samples
+  - New England: ~80 samples
+  - South Atlantic: ~28 samples
+- **Key improvements**:
+  - No arbitrary defaults - unmappable samples are excluded
+  - Strict regional keyword matching
+  - Quality filtering via voting data
 
 ### Real Examples from v22.0 Data
 - "United States English" → West (441,218 samples with zero regional info)
@@ -232,11 +261,19 @@ All datasets map to these 8 US regions:
 - "United States English,southern United States" → Deep South (only 551 samples)
 - 42 different "Midwest" variants showing extreme inconsistency
 
-### Loader Implementation
+### Loader Implementations
+
+#### FilteredCommonVoiceLoader (RECOMMENDED)
+- **File**: `commonvoice_filtered_loader.py`
+- **Class**: `FilteredCommonVoiceLoader`
+- **Dataset location**: `.cache/CommonVoice/cv-corpus-22.0-2025-06-20/en/`
+- **Processing**: Fast - only processes ~5,558 regional samples
+- **Usage in prepare_dataset.py**: `--datasets FilteredCommonVoice`
+
+#### Original CommonVoiceLoader (NOT RECOMMENDED)
 - **File**: `unified_dataset.py`
 - **Class**: `CommonVoiceLoader`
-- **Manual download**: Required from commonvoice.mozilla.org (v22.0)
-- **Processing**: No sample limit - processes all US samples (may take significant time)
+- **Issues**: Includes 441K generic samples that corrupt training
 
 ---
 
@@ -264,16 +301,16 @@ All datasets map to these 8 US regions:
 ```
 
 ### Components
-| Code | City | State | Our Region | Status |
-|------|------|-------|------------|---------|
-| DCA | Washington DC | DC | Mid-Atlantic | ✅ Available |
-| DCB | Washington DC | DC | Mid-Atlantic | ✅ Available |
-| ATL | Atlanta | GA | Deep South | ✅ Available |
-| PRV | Princeville | NC | South Atlantic | ✅ Available |
-| VLD | Valdosta | GA | Deep South | ❌ No files found |
-| ROC | Rochester | NY | New York Metropolitan | ✅ Available |
-| LES | Lower East Side | NY | New York Metropolitan | ✅ Available |
-| DTA | Detroit | MI | Upper Midwest | ✅ Available |
+| Code | City | State | Our Region | Audio Files | Status |
+|------|------|-------|------------|-------------|--------|
+| DCA | Washington DC | DC | Mid-Atlantic | Multiple | ✅ Available |
+| DCB | Washington DC | DC | Mid-Atlantic | In temp_DCB | ✅ Available |
+| ATL | Atlanta | GA | Deep South | Multiple | ✅ Available |
+| PRV | Princeville | NC | South Atlantic | 4 files | ✅ Available |
+| VLD | Valdosta | GA | Deep South | 0 | ❌ Not found |
+| ROC | Rochester | NY | New York Metropolitan | Multiple | ✅ Available |
+| LES | Lower East Side | NY | New York Metropolitan | Multiple | ✅ Available |
+| DTA | Detroit | MI | Upper Midwest | 8 files | ✅ Available |
 
 ### Metadata
 - **Naming**: `COMPONENT_speaker_interviewer.wav`
@@ -303,16 +340,16 @@ All datasets map to these 8 US regions:
 
 ---
 
-## 6. SBCSAE - Santa Barbara Corpus of Spoken American English ⚠️ NOT WORKING
+## 6. SBCSAE - Santa Barbara Corpus of Spoken American English ⚠️ AUDIO NOT AVAILABLE
 
-### ⚠️ CRITICAL STATUS - AUDIO FILES NOT AVAILABLE
-**Current Status: NO AUDIO FILES CAN BE AUTOMATICALLY DOWNLOADED**
+### ⚠️ STATUS - TRANSCRIPTS ONLY, NO AUDIO
+**Current Status: Transcripts downloaded successfully, audio requires manual acquisition**
 
-#### The Reality:
-- **Expected**: 60 audio files (SBC001.wav - SBC060.wav)
-- **Actually available**: **0 audio files**
-- **Auto-download success**: **FAILED**
-- **Transcripts downloaded**: 60 transcript files ✅
+#### Current State:
+- **Transcripts available**: 60 transcript files (.trn) ✅
+- **Audio files available**: 0 audio files ❌
+- **Metadata generated**: Yes, for 120 speakers ✅
+- **Contributing to training**: 0 samples (no audio)
 
 ### Overview
 - **Source**: UC Santa Barbara Linguistics Department
@@ -452,21 +489,27 @@ choices=["TIMIT", "CommonVoice", "CORAAL", "SAA", "PNC", "MyDataset"]
 
 ## Dataset Statistics
 
-### Current Distribution (TIMIT + SAA + CORAAL)
+### Current Distribution (Latest Prepared Dataset - accent_dataset_balanced)
 
-| Region | TIMIT | SAA | CORAAL* | Total | % of Dataset |
-|--------|-------|-----|---------|-------|--------------|
-| Deep South | 1,980 | 0 | ~150 | 2,130 | ~24% |
-| West | 1,330 | 25 | 0 | 1,355 | ~15% |
-| Upper Midwest | 1,020 | 3 | ~40 | 1,063 | ~12% |
-| Lower Midwest | 1,020 | 0 | 0 | 1,020 | ~11% |
-| **South Atlantic** | 0 | 707 | ~50** | 757 | ~9% |
-| New York Metropolitan | 460 | 67 | ~60 | 587 | ~7% |
-| New England | 490 | 14 | 0 | 504 | ~6% |
-| **Mid-Atlantic** | 0 | 381 | ~80 | 461 | ~5% |
+**Total samples after chunking and filtering: 8,860**
 
-*CORAAL estimates based on chunked long-form interviews (30-60 min per speaker)
-**PRV component now included for North Carolina coverage
+| Region | Samples | % of Dataset | Primary Sources |
+|--------|---------|--------------|----------------|
+| Midwest* | 2,934 | 33.1% | TIMIT, FilteredCommonVoice, CORAAL |
+| Deep South | 2,151 | 24.3% | TIMIT, FilteredCommonVoice, CORAAL |
+| West | 1,751 | 19.8% | TIMIT, FilteredCommonVoice, SAA |
+| New York Metropolitan | 811 | 9.2% | TIMIT, FilteredCommonVoice, CORAAL |
+| Mid-Atlantic | 603 | 6.8% | SAA, CORAAL, FilteredCommonVoice |
+| New England | 560 | 6.3% | TIMIT, FilteredCommonVoice |
+| South Atlantic | 50 | 0.6% | CORAAL (PRV), FilteredCommonVoice |
+
+*Upper Midwest and Lower Midwest have been consolidated into a single "Midwest" region
+
+**Key improvements from latest dataset:**
+- FilteredCommonVoice successfully contributes 5,558 regional samples
+- CORAAL chunks provide extensive coverage after audio chunking
+- Speaker capping at 50 samples prevents memorization
+- All samples have chunk metadata for efficient loading
 
 ### Key Insights
 - SAA fills critical gaps in Mid-Atlantic and South Atlantic
@@ -501,14 +544,18 @@ choices=["TIMIT", "CommonVoice", "CORAAL", "SAA", "PNC", "MyDataset"]
 1. **Start with TIMIT**: Cleanest, most consistent labels
 2. **Add SAA**: For Mid-Atlantic and South Atlantic coverage
 3. **Add CORAAL**: For diversity and city-specific samples
-4. **AVOID CommonVoice**: Unreliable labels corrupt training
+4. **Use FilteredCommonVoice**: Adds 5,558 quality regional samples
+5. **AVOID original CommonVoice**: Generic labels corrupt training
 
 ### Recommended Dataset Combinations
 
 #### High Quality Training (RECOMMENDED)
 ```bash
-# Best quality - reliable labels only
-python prepare_dataset.py --datasets TIMIT SAA CORAAL
+# Best quality with filtered CommonVoice
+python prepare_dataset.py --datasets TIMIT FilteredCommonVoice CORAAL SAA
+
+# With speaker capping to prevent memorization
+python prepare_dataset.py --datasets TIMIT FilteredCommonVoice CORAAL SAA --max_samples_per_speaker 50
 ```
 
 #### Baseline Testing
@@ -525,13 +572,15 @@ python prepare_dataset.py --datasets TIMIT SAA
 
 ### ⚠️ Dataset Quality Issues
 
-| Dataset | Label Quality | Location Data | Recommendation |
-|---------|--------------|---------------|----------------|
-| TIMIT | ✅ Excellent | Dialect regions | **Use as primary** |
-| SAA | ✅ Good | State-level | **Use for coverage** |
-| CORAAL | ✅ Excellent | City-specific | **Use for diversity** |
-| CommonVoice | ❌ Poor | None | **AVOID** |
-| PNC | ✅ Good | City-specific | Use if available |
+| Dataset | Label Quality | Location Data | Samples | Recommendation |
+|---------|--------------|---------------|---------|----------------|
+| TIMIT | ✅ Excellent | Dialect regions | 6,300 | **Use as primary** |
+| SAA | ✅ Good | State-level | 1,197 | **Use for coverage** |
+| CORAAL | ✅ Excellent | City-specific | ~380 chunks | **Use for diversity** |
+| FilteredCommonVoice | ✅ Good | Regional keywords | 5,558 | **Use filtered version** |
+| CommonVoice (original) | ❌ Poor | None | 441K | **AVOID** |
+| SBCSAE | ✅ Good | State-level | 0 (no audio) | **Manual setup only** |
+| PNC | ✅ Good | City-specific | 0 | Not available |
 
 ### Why CommonVoice Fails for Regional Accents
 
@@ -543,20 +592,35 @@ python prepare_dataset.py --datasets TIMIT SAA
 
 ### Sample Commands
 ```bash
-# RECOMMENDED: High-quality training
-python prepare_dataset.py --datasets TIMIT SAA CORAAL
+# RECOMMENDED: High-quality training with all working datasets
+python prepare_dataset.py \
+    --datasets TIMIT FilteredCommonVoice CORAAL SAA \
+    --max_samples_per_speaker 50 \
+    --output_dir prepared_dataset \
+    --force \
+    --min_chunk_duration 5.0 \
+    --max_chunk_duration 10.0
 
 # Debugging: Start simple
 python prepare_dataset.py --datasets TIMIT
 
-# Test subset
-python prepare_dataset.py --datasets TIMIT SAA --max_samples_per_dataset 100
+# Test subset with chunking
+python prepare_dataset.py --datasets TIMIT SAA --max_samples_per_dataset 100 \
+    --chunk_duration 7.5 --chunk_overlap 2.5
 
-# NOT RECOMMENDED: Including CommonVoice
+# NOT RECOMMENDED: Original CommonVoice
 # python prepare_dataset.py --datasets TIMIT CommonVoice  # Will hurt performance!
 ```
 
 ---
 
-*Last updated: 2025-08-17*
-*Pipeline version: 1.0*
+*Last updated: 2025-08-18*
+*Pipeline version: 1.1*
+
+### Summary of Key Updates (Aug 18):
+- ✅ **FilteredCommonVoice** successfully extracts 5,558 regional samples
+- ✅ **Chunking** now applied to all datasets by default (7.5s chunks, 2.5s overlap)
+- ✅ **Regional consolidation**: Upper/Lower Midwest merged into single "Midwest" region
+- ✅ **Speaker capping**: Max 50 samples per speaker prevents memorization
+- ✅ **CORAAL components**: PRV (4 files), DTA (8 files) confirmed working
+- ⚠️ **SBCSAE**: Transcripts available but audio still requires manual acquisition
