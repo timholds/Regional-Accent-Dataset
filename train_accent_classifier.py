@@ -8,6 +8,7 @@ using a prepared dataset.
 
 import argparse
 import os
+import time
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -24,11 +25,65 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import wandb
 import json
-import seaborn as sns
+import signal
+import sys
+import atexit
+import gc
+
+# Set matplotlib to non-interactive backend BEFORE importing pyplot
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to prevent display issues
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from unified_dataset import UnifiedSample, UnifiedAccentDatasetTorch
-from simple_cached_dataset import SimpleCachedDataset
+from optimized_dataset import OptimizedAccentDataset
+
+# Enable TF32 for faster computation on Ampere GPUs (RTX 30XX, A100, etc.)
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+# Global variable to track if cleanup has been done
+_cleanup_done = False
+
+def cleanup_gpu():
+    """Cleanup GPU memory and resources"""
+    global _cleanup_done
+    if _cleanup_done:
+        return
+    _cleanup_done = True
+    
+    print("\nCleaning up GPU resources...")
+    try:
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Close matplotlib figures
+        plt.close('all')
+        
+        # Finish wandb if it's running
+        if wandb.run is not None:
+            wandb.finish()
+        
+        print("GPU cleanup completed")
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+
+def signal_handler(sig, frame):
+    """Handle interrupt signals gracefully"""
+    print("\n\nInterrupt received, cleaning up...")
+    cleanup_gpu()
+    sys.exit(0)
+
+# Register cleanup handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+atexit.register(cleanup_gpu)
 
 
 def calculate_speaker_consistency(sample_ids, predictions):
@@ -108,8 +163,8 @@ def parse_args():
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=16,
                        help="Training batch size")
-    parser.add_argument("--eval_batch_size", type=int, default=32,
-                       help="Evaluation batch size")
+    parser.add_argument("--eval_batch_size", type=int, default=None,
+                       help="Evaluation batch size (default: 2x training batch size)")
     parser.add_argument("--epochs", type=int, default=10,
                        help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=3e-5,  # Lower for stable training
@@ -136,10 +191,6 @@ def parse_args():
     # Other arguments
     parser.add_argument("--output_dir", type=str, default="accent_classifier_output",
                        help="Output directory for model and logs")
-    parser.add_argument("--use_cache", action="store_true",
-                       help="Cache processed features for faster subsequent runs")
-    parser.add_argument("--clear_cache", action="store_true",
-                       help="Clear existing cache before training")
     parser.add_argument("--save_steps", type=int, default=500,
                        help="Save checkpoint every N steps")
     parser.add_argument("--eval_steps", type=int, default=100,
@@ -152,10 +203,12 @@ def parse_args():
                        help="W&B project name")
     parser.add_argument("--desc", type=str, default=None,
                        help="Run description to log with wandb (e.g., 'LoRA test with LR .0003')")
-    parser.add_argument("--chunk_duration", type=float, default=7.5,
-                       help="Target chunk duration in seconds (default: 7.5)")
-    parser.add_argument("--chunk_overlap", type=float, default=2.5,
-                       help="Chunk overlap in seconds (default: 2.5)")
+    
+    # Performance arguments
+    parser.add_argument("--no_compile", action="store_true",
+                       help="Disable torch.compile (enabled by default on PyTorch 2.0+)")
+    parser.add_argument("--num_workers", type=int, default=None,
+                       help="Number of dataloader workers (default: auto-detect)")
     
     return parser.parse_args()
 
@@ -217,54 +270,40 @@ def load_prepared_dataset(dataset_path: str, processor, args=None):
     # Create PyTorch datasets with consistent label mapping from config
     label_mapping = config.get('label_mapping', None)
     
-    # Simple: use cached dataset if requested, otherwise standard dataset
-    if getattr(args, 'use_cache', False):
-        train_dataset = SimpleCachedDataset(train_samples, processor, label_mapping=label_mapping)
-        val_dataset = SimpleCachedDataset(val_samples, processor, label_mapping=label_mapping)
-        test_dataset = SimpleCachedDataset(test_samples, processor, label_mapping=label_mapping)
-    else:
-        # Enable chunking for long audio files (CORAAL, SBCSAE, etc.)
-        # Convert seconds to samples at 16kHz
-        chunk_length_samples = int(args.chunk_duration * 16000)
-        chunk_overlap_samples = int(args.chunk_overlap * 16000)
-        
-        train_dataset = UnifiedAccentDatasetTorch(
-            train_samples, processor, 
-            label_mapping=label_mapping,
-            enable_chunking=True,
-            chunk_length=chunk_length_samples,
-            chunk_overlap=chunk_overlap_samples
-        )
-        val_dataset = UnifiedAccentDatasetTorch(
-            val_samples, processor, 
-            label_mapping=label_mapping,
-            enable_chunking=True,
-            chunk_length=chunk_length_samples,
-            chunk_overlap=chunk_overlap_samples
-        )
-        test_dataset = UnifiedAccentDatasetTorch(
-            test_samples, processor, 
-            label_mapping=label_mapping,
-            enable_chunking=True,
-            chunk_length=chunk_length_samples,
-            chunk_overlap=chunk_overlap_samples
-        )
+    # Check if dataset is pre-chunked
+    pre_chunked = config.get('pre_chunked', False)
     
-    # Clear cache if requested
-    if getattr(args, 'clear_cache', False) and getattr(args, 'use_cache', False):
-        print("\nClearing feature cache...")
-        for dataset in [train_dataset, val_dataset, test_dataset]:
-            if hasattr(dataset, 'clear_cache'):
-                dataset.clear_cache()
+    if pre_chunked:
+        print("Dataset includes pre-chunked audio samples")
+        # For pre-chunked data, add chunk boundaries to samples if present
+        if 'chunk_start_sample' in train_df.columns:
+            for samples, df in [(train_samples, train_df), (val_samples, val_df), (test_samples, test_df)]:
+                for i, sample in enumerate(samples):
+                    if pd.notna(df.iloc[i].get('chunk_start_sample')):
+                        sample.chunk_start_sample = int(df.iloc[i]['chunk_start_sample'])
+                        sample.chunk_end_sample = int(df.iloc[i]['chunk_end_sample'])
     
-    # Print cache stats if using cache
-    if getattr(args, 'use_cache', False):
-        print("\nCache Statistics:")
-        for name, dataset in [("Train", train_dataset), ("Val", val_dataset), ("Test", test_dataset)]:
-            if hasattr(dataset, 'get_cache_stats'):
-                stats = dataset.get_cache_stats()
-                print(f"  {name}: {stats['cached_samples']}/{stats['total_samples']} cached "
-                      f"({stats['cache_hit_rate']*100:.1f}%)")
+    # Always use OptimizedAccentDataset (all datasets now have chunk metadata)
+    
+    print("Using OptimizedAccentDataset with audio caching")
+    train_dataset = OptimizedAccentDataset(
+        train_samples, processor, 
+        label_mapping=label_mapping,
+        pre_chunked=pre_chunked,
+        cache_size=200  # Cache up to 200 audio files
+    )
+    val_dataset = OptimizedAccentDataset(
+        val_samples, processor, 
+        label_mapping=label_mapping,
+        pre_chunked=pre_chunked,
+        cache_size=100
+    )
+    test_dataset = OptimizedAccentDataset(
+        test_samples, processor, 
+        label_mapping=label_mapping,
+        pre_chunked=pre_chunked,
+        cache_size=100
+    )
     
     return train_dataset, val_dataset, test_dataset, config, metadata
 
@@ -368,56 +407,9 @@ def print_model_summary(model, args=None):
     print("="*60 + "\n")
 
 
-def setup_model(args, num_labels, use_cached=False):
+def setup_model(args, num_labels):
     """Setup model with optional LoRA"""
     print(f"Loading model: {args.model_name}")
-    
-    if use_cached:
-        print("\nDEBUG: use_cached=True, creating CachedEncoderClassifier.\n")
-        # For cached encoder outputs, create lightweight classifier
-        print("Using lightweight classifier for cached encoder outputs")
-        
-        class CachedEncoderClassifier(nn.Module):
-            def __init__(self, hidden_size, hidden_dim, num_labels, dropout_rate):
-                super().__init__()
-                self.classifier = nn.Sequential(
-                    nn.Linear(hidden_size, hidden_dim),
-                    nn.ReLU(),
-                    nn.Dropout(dropout_rate),
-                    nn.Linear(hidden_dim, hidden_dim // 2),
-                    nn.ReLU(),
-                    nn.Dropout(dropout_rate),
-                    nn.Linear(hidden_dim // 2, num_labels)
-                )
-            
-            def forward(self, input_values, attention_mask=None, labels=None):
-                # input_values are encoder outputs [batch, seq_len, hidden_size]
-                hidden_states = input_values
-                
-                # Pool over sequence dimension using attention mask
-                if attention_mask is not None:
-                    mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size())
-                    sum_hidden = torch.sum(hidden_states * mask_expanded, dim=1)
-                    sum_mask = torch.sum(attention_mask, dim=1, keepdim=True)
-                    pooled = sum_hidden / sum_mask
-                else:
-                    pooled = hidden_states.mean(dim=1)
-                
-                logits = self.classifier(pooled)
-                
-                loss = None
-                if labels is not None:
-                    loss_fct = nn.CrossEntropyLoss()
-                    loss = loss_fct(logits, labels)
-                
-                from transformers.modeling_outputs import SequenceClassifierOutput
-                return SequenceClassifierOutput(loss=loss, logits=logits)
-            
-            def save_pretrained(self, path):
-                os.makedirs(path, exist_ok=True)
-                torch.save(self.state_dict(), os.path.join(path, 'pytorch_model.bin'))
-        
-        return CachedEncoderClassifier(768, args.hidden_dim, num_labels, args.dropout_rate)
     
     model = Wav2Vec2ForSequenceClassification.from_pretrained(
         args.model_name,
@@ -572,15 +564,19 @@ def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
             labels = batch['labels'].to(device)
             sample_ids = batch['sample_ids']
             
+            # Only get logits, don't compute loss in forward pass
             outputs = model(
                 input_values=input_values,
-                attention_mask=attention_mask,
-                labels=labels
+                attention_mask=attention_mask
             )
             
-            total_loss += outputs.loss.item()
-            
             logits = outputs.logits
+            
+            # Compute loss separately if needed (optional - comment out if not needed)
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(logits, labels)
+            total_loss += loss.item()
+            
             predictions = logits.argmax(dim=-1)
             
             all_predictions.extend(predictions.cpu().numpy())
@@ -679,11 +675,14 @@ def main():
     # Setup device
     if torch.cuda.is_available():
         device = torch.device("cuda")
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        print(f"TensorFloat-32 (TF32) enabled: {torch.backends.cuda.matmul.allow_tf32}")
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
+        print(f"Using device: {device}")
     else:
         device = torch.device("cpu")
-    print(f"Using device: {device}")
+        print(f"Using device: {device}")
     
     # Load processor
     print(f"\nLoading processor from {args.model_name}")
@@ -695,27 +694,54 @@ def main():
         args.dataset_path, processor, args
     )
     
-    # Create data loaders
+    # Set eval batch size if not specified (default to 4x training batch size for faster eval)
+    if args.eval_batch_size is None:
+        args.eval_batch_size = args.batch_size * 4
+        print(f"\nSetting eval batch size to {args.eval_batch_size} (4x training batch size)")
+    
+    # Determine optimal number of workers - REDUCED to prevent resource exhaustion
+    import multiprocessing
+    if args.num_workers is None:
+        # Limit workers to prevent GPU display manager issues
+        num_workers = min(2, multiprocessing.cpu_count() // 4)  # Much fewer workers
+    else:
+        num_workers = min(args.num_workers, 4)  # Cap at 4 even if user specifies more
+    
+    # Create data loaders with safer settings to prevent GPU/display issues
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size, 
         shuffle=True, 
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        num_workers=num_workers,  # Reduced workers
+        pin_memory=torch.cuda.is_available(),  # Enable pinned memory for GPU transfer
+        prefetch_factor=2 if num_workers > 0 else None,  # Only prefetch with workers
+        persistent_workers=num_workers > 0  # Keep workers alive between epochs if using workers
     )
     
     val_loader = DataLoader(
         val_dataset, 
         batch_size=args.eval_batch_size, 
         shuffle=False, 
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available() and args.eval_batch_size <= 32,
+        prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=num_workers > 0  # Keep workers alive if using workers
     )
     
     test_loader = DataLoader(
         test_dataset, 
         batch_size=args.eval_batch_size, 
         shuffle=False, 
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available() and args.eval_batch_size <= 32,
+        prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=num_workers > 0  # Keep workers alive if using workers
     )
+    
+    print(f"  Using {num_workers} workers for data loading")
     
     print(f"\nDataLoader info:")
     print(f"  Train batches: {len(train_loader)}")
@@ -755,8 +781,17 @@ def main():
     print(f"Class weights: {class_weights}")
     
     # Setup model
-    model = setup_model(args, num_labels, use_cached=getattr(args, 'use_cache', False))
+    model = setup_model(args, num_labels)
     model.to(device)
+    
+    # Compile model by default on PyTorch 2.0+ (unless disabled)
+    if not args.no_compile and hasattr(torch, 'compile'):
+        print("Compiling model with torch.compile() for optimized performance...")
+        try:
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"Warning: torch.compile() failed: {e}")
+            print("Continuing without compilation...")
     
     # Print model summary
     print_model_summary(model, args)
@@ -784,8 +819,11 @@ def main():
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
         
         # Train
+        epoch_start = time.time()
         train_loss = train_epoch(model, train_loader, optimizer, scheduler, device, args, class_weights)
+        epoch_time = time.time() - epoch_start
         print(f"Average training loss: {train_loss:.4f}")
+        print(f"Epoch time: {epoch_time:.1f}s ({epoch_time/len(train_loader):.2f}s per batch)")
         
         # Evaluate
         val_results = evaluate(model, val_loader, device, "validation", num_labels)
@@ -799,6 +837,8 @@ def main():
         log_dict = {
             'epoch': epoch,
             'train/epoch_loss': train_loss,
+            'train/epoch_time': epoch_time,
+            'train/batch_time': epoch_time/len(train_loader),
             'val/loss': val_results['loss'],
             'val/accuracy': val_results['accuracy'],
             'val/top2_accuracy': val_results['top2_accuracy'],

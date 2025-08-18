@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import requests
 from urllib.parse import urlparse
+import librosa
 
 from region_mappings import get_region_for_state, MediumRegion, MEDIUM_MAPPINGS
 from audio_segmentation import segment_audio_smart, process_and_segment_audio
@@ -888,18 +889,23 @@ class UnifiedAccentDataset:
         
         df = pd.DataFrame([s.to_dict() for s in self.all_samples])
         
-        # Overall statistics
-        metadata['region_distribution'] = df['region_label'].value_counts().to_dict()
-        metadata['gender_distribution'] = df['gender'].value_counts().to_dict()
+        # Overall statistics (only if samples exist)
+        if len(df) > 0:
+            metadata['region_distribution'] = df['region_label'].value_counts().to_dict()
+            metadata['gender_distribution'] = df['gender'].value_counts().to_dict() if 'gender' in df else {}
+        else:
+            metadata['region_distribution'] = {}
+            metadata['gender_distribution'] = {}
         
         # Per-dataset statistics
-        for dataset_name in df['dataset_name'].unique():
-            dataset_df = df[df['dataset_name'] == dataset_name]
-            metadata['datasets'][dataset_name] = {
-                'samples': len(dataset_df),
-                'speakers': dataset_df['speaker_id'].nunique(),
-                'regions': dataset_df['region_label'].value_counts().to_dict()
-            }
+        if len(df) > 0:
+            for dataset_name in df['dataset_name'].unique():
+                dataset_df = df[df['dataset_name'] == dataset_name]
+                metadata['datasets'][dataset_name] = {
+                    'samples': len(dataset_df),
+                    'speakers': dataset_df['speaker_id'].nunique(),
+                    'regions': dataset_df['region_label'].value_counts().to_dict()
+                }
         
         with open(self.metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -913,6 +919,7 @@ class UnifiedAccentDataset:
                                    seed: int = 42) -> Tuple[List[UnifiedSample], List[UnifiedSample], List[UnifiedSample]]:
         """
         Create train/val/test splits ensuring no speaker overlap
+        Uses weighted assignment to achieve target sample ratios
         """
         if not self.all_samples:
             raise ValueError("No samples loaded. Call load_all_datasets() first.")
@@ -920,31 +927,73 @@ class UnifiedAccentDataset:
         np.random.seed(seed)
         df = pd.DataFrame([s.to_dict() for s in self.all_samples])
         
-        # Get unique speakers per region
+        # Calculate target sample counts
+        total_samples = len(df)
+        target_test_samples = int(total_samples * test_ratio)
+        target_val_samples = int(total_samples * val_ratio)
+        target_train_samples = total_samples - target_test_samples - target_val_samples
+        
+        # Get speaker sample counts
+        speaker_sample_counts = df.groupby('speaker_id').size().to_dict()
+        
+        # Group speakers by region for stratification
         speakers_by_region = {}
         for region in df[stratify_by].unique():
             region_df = df[df[stratify_by] == region]
-            speakers_by_region[region] = region_df['speaker_id'].unique().tolist()
+            region_speakers = region_df['speaker_id'].unique().tolist()
+            # Sort by sample count (descending) for better greedy assignment
+            region_speakers.sort(key=lambda s: speaker_sample_counts[s], reverse=True)
+            speakers_by_region[region] = region_speakers
+        
+        # Calculate target samples per region for each split
+        region_totals = df[stratify_by].value_counts().to_dict()
         
         train_speakers, val_speakers, test_speakers = [], [], []
+        train_count, val_count, test_count = 0, 0, 0
         
-        # Split speakers per region to maintain distribution
+        # Process each region
         for region, speakers in speakers_by_region.items():
-            np.random.shuffle(speakers)
-            n_speakers = len(speakers)
-            n_val = int(n_speakers * val_ratio)
-            n_test = int(n_speakers * test_ratio)
+            region_total = region_totals[region]
+            region_target_test = int(region_total * test_ratio)
+            region_target_val = int(region_total * val_ratio)
             
-            test_speakers.extend(speakers[:n_test])
-            val_speakers.extend(speakers[n_test:n_test + n_val])
-            train_speakers.extend(speakers[n_test + n_val:])
+            # Shuffle speakers within region for randomness
+            np.random.shuffle(speakers)
+            
+            region_test_count = 0
+            region_val_count = 0
+            
+            for speaker in speakers:
+                speaker_samples = speaker_sample_counts[speaker]
+                
+                # Assign to test if we still need test samples for this region
+                if region_test_count < region_target_test and test_count < target_test_samples:
+                    test_speakers.append(speaker)
+                    test_count += speaker_samples
+                    region_test_count += speaker_samples
+                # Assign to val if we still need val samples for this region
+                elif region_val_count < region_target_val and val_count < target_val_samples:
+                    val_speakers.append(speaker)
+                    val_count += speaker_samples
+                    region_val_count += speaker_samples
+                # Otherwise assign to train
+                else:
+                    train_speakers.append(speaker)
+                    train_count += speaker_samples
         
         # Create splits based on speakers
         train_samples = [s for s in self.all_samples if s.speaker_id in train_speakers]
         val_samples = [s for s in self.all_samples if s.speaker_id in val_speakers]
         test_samples = [s for s in self.all_samples if s.speaker_id in test_speakers]
         
-        logger.info(f"Split sizes - Train: {len(train_samples)}, Val: {len(val_samples)}, Test: {len(test_samples)}")
+        # Log the actual percentages achieved
+        actual_train_pct = len(train_samples) / total_samples * 100
+        actual_val_pct = len(val_samples) / total_samples * 100
+        actual_test_pct = len(test_samples) / total_samples * 100
+        
+        logger.info(f"Split sizes - Train: {len(train_samples)} ({actual_train_pct:.1f}%), "
+                   f"Val: {len(val_samples)} ({actual_val_pct:.1f}%), "
+                   f"Test: {len(test_samples)} ({actual_test_pct:.1f}%)")
         
         # Save split information
         split_info = {
@@ -1005,15 +1054,23 @@ class UnifiedAccentDataset:
 
 
 class UnifiedAccentDatasetTorch(Dataset):
-    """PyTorch Dataset wrapper for unified samples"""
+    """PyTorch Dataset wrapper for unified samples with chunking support"""
     
     def __init__(self, samples: List[UnifiedSample], processor, 
                  target_sr: int = 16000, max_length: int = 160000, 
-                 label_mapping: Optional[Dict[str, int]] = None):
+                 label_mapping: Optional[Dict[str, int]] = None,
+                 enable_chunking: bool = False,
+                 chunk_length: int = 120000,  # 7.5 seconds at 16kHz
+                 chunk_overlap: int = 40000,  # 2.5 seconds overlap
+                 pre_chunked: bool = False):  # Whether samples have pre-computed chunks
         self.samples = samples
         self.processor = processor
         self.target_sr = target_sr
         self.max_length = max_length
+        self.enable_chunking = enable_chunking
+        self.chunk_length = chunk_length
+        self.chunk_overlap = chunk_overlap
+        self.pre_chunked = pre_chunked
         
         # Use provided label mapping or create from all possible regions
         if label_mapping is not None:
@@ -1031,17 +1088,101 @@ class UnifiedAccentDatasetTorch(Dataset):
             }
         
         self.label_to_region = {v: k for k, v in self.region_to_label.items()}
+        
+        # Setup for lazy chunking
+        self.chunk_cache = {}  # sample_idx -> (audio_length, list of chunk bounds)
+        
+        # For non-chunking mode, create simple mapping
+        if not self.enable_chunking:
+            self.chunked_samples = [(sample, None) for sample in self.samples]
             
         logger.info(f"Dataset initialized with {len(self.samples)} samples")
         logger.info(f"Using label mapping with {len(self.region_to_label)} regions: {self.region_to_label}")
+        if self.enable_chunking:
+            logger.info(f"Lazy chunking enabled: chunk_length={chunk_length/16000:.2f}s, overlap={chunk_overlap/16000:.2f}s")
+    
+    def _get_chunks_for_sample(self, sample_idx):
+        """Lazily determine chunks for a sample"""
+        if sample_idx in self.chunk_cache:
+            return self.chunk_cache[sample_idx]
+        
+        sample = self.samples[sample_idx]
+        chunks = []
+        
+        try:
+            audio_path = sample.audio_path
+            if not os.path.exists(audio_path):
+                logger.warning(f"Audio file not found: {audio_path}")
+                chunks = [(sample, None)]
+            elif audio_path.endswith('.csv'):
+                # Skip non-audio files (bug in SBCSAE loader)
+                logger.warning(f"Skipping non-audio file: {audio_path}")
+                chunks = [(sample, None)]
+            else:
+                # Use soundfile to get audio length without loading the full file
+                try:
+                    import soundfile as sf
+                    with sf.SoundFile(audio_path) as f:
+                        orig_length = len(f)
+                        orig_sr = f.samplerate
+                        # Calculate length at target sample rate
+                        if orig_sr != self.target_sr:
+                            audio_length = int(orig_length * self.target_sr / orig_sr)
+                        else:
+                            audio_length = orig_length
+                except Exception as e:
+                    # Skip files that can't be read
+                    logger.warning(f"Cannot read audio file {audio_path}: {e}")
+                    chunks = [(sample, None)]
+                    self.chunk_cache[sample_idx] = chunks
+                    return chunks
+                
+                # If audio is shorter than or equal to chunk_length, use as is
+                if audio_length <= self.chunk_length:
+                    chunks = [(sample, None)]
+                else:
+                    # Create overlapping chunks
+                    step = self.chunk_length - self.chunk_overlap
+                    
+                    for start_idx in range(0, audio_length - self.chunk_length + 1, step):
+                        end_idx = start_idx + self.chunk_length
+                        chunks.append((sample, (start_idx, end_idx)))
+                    
+                    # Handle the last chunk if there's remaining audio
+                    if chunks and audio_length > chunks[-1][1][1]:
+                        # Create a final chunk anchored at the end
+                        start_idx = max(0, audio_length - self.chunk_length)
+                        end_idx = audio_length
+                        chunks.append((sample, (start_idx, end_idx)))
+                    
+                    if len(chunks) > 1:
+                        logger.debug(f"Lazily created {len(chunks)} chunks for {sample.sample_id} (duration: {audio_length/self.target_sr:.2f}s)")
+                        
+        except Exception as e:
+            logger.warning(f"Error processing {sample.sample_id}: {e}")
+            chunks = [(sample, None)]
+        
+        self.chunk_cache[sample_idx] = chunks
+        return chunks
     
     def __len__(self):
+        if not self.enable_chunking:
+            return len(self.chunked_samples)
+        
+        # For lazy chunking with DataLoader, return number of samples
+        # Each sample will provide one chunk per epoch (randomly selected if multiple)
         return len(self.samples)
     
     def __getitem__(self, idx):
-        # Implementation similar to TimitAccentDataset
-        # but using UnifiedSample format
-        sample = self.samples[idx]
+        if not self.enable_chunking:
+            # Get the sample and optional chunk boundaries
+            sample, chunk_bounds = self.chunked_samples[idx]
+        else:
+            # With lazy chunking, idx refers to sample index
+            # Get all chunks for this sample and randomly select one
+            chunks = self._get_chunks_for_sample(idx)
+            import random
+            sample, chunk_bounds = random.choice(chunks)
         
         # Handle different path types
         audio_path = sample.audio_path
@@ -1073,34 +1214,66 @@ class UnifiedAccentDatasetTorch(Dataset):
         
         # Load and process audio
         import librosa
-        try:
-            audio, sr = librosa.load(audio_path, sr=self.target_sr)
-        except Exception as e:
-            logger.error(f"Failed to load audio from {audio_path}: {e}")
-            logger.error(f"Sample info - Dataset: {sample.dataset_name}, ID: {sample.sample_id}")
-            raise
         
-        # Handle segmented samples (from load-time segmentation)
-        if hasattr(sample, '_segment_start'):
-            start_sample = sample._segment_start
-            end_sample = sample._segment_end
-            
-            # Extract the specific segment
-            if end_sample <= len(audio):
-                audio = audio[start_sample:end_sample]
-            else:
-                # Shouldn't happen if segmentation was done correctly
-                logger.warning(f"Segment bounds exceed audio length for {sample.sample_id}")
+        # Skip non-audio files (SBCSAE loader bug uses CSV as placeholder)
+        if audio_path.endswith('.csv'):
+            logger.warning(f"Skipping non-audio file (using silence): {audio_path}")
+            audio = np.zeros(self.chunk_length if self.enable_chunking else self.max_length)
+        else:
+            try:
+                audio, sr = librosa.load(audio_path, sr=self.target_sr)
+            except Exception as e:
+                logger.error(f"Failed to load audio from {audio_path}: {e}")
+                logger.error(f"Sample info - Dataset: {sample.dataset_name}, ID: {sample.sample_id}")
+                raise
+        
+        # Apply chunking if boundaries are specified
+        if chunk_bounds is not None:
+            start_idx, end_idx = chunk_bounds
+            audio = audio[start_idx:end_idx]
+            # Modify sample_id to indicate chunk
+            # For lazy chunking, use chunk bounds to create unique ID
+            chunk_id = f"{start_idx//1000}k_{end_idx//1000}k"  # Use start/end in kilosamples
+            sample_id = f"{sample.sample_id}_chunk_{chunk_id}"
+        else:
+            sample_id = sample.sample_id
+            # Handle pre-chunked samples (from dataset preparation)
+            if self.pre_chunked and hasattr(sample, 'chunk_start_sample'):
+                start_sample = sample.chunk_start_sample
+                end_sample = sample.chunk_end_sample
+                
+                # Extract the specific chunk
+                if end_sample <= len(audio):
+                    audio = audio[start_sample:end_sample]
+                else:
+                    # Shouldn't happen if chunking was done correctly
+                    logger.warning(f"Chunk bounds exceed audio length for {sample.sample_id}")
+                    audio = audio[start_sample:min(end_sample, len(audio))]
+            # Handle segmented samples (from load-time segmentation)
+            elif hasattr(sample, '_segment_start'):
+                start_sample = sample._segment_start
+                end_sample = sample._segment_end
+                
+                # Extract the specific segment
+                if end_sample <= len(audio):
+                    audio = audio[start_sample:end_sample]
+                else:
+                    # Shouldn't happen if segmentation was done correctly
+                    logger.warning(f"Segment bounds exceed audio length for {sample.sample_id}")
         
         # Track original length before padding
         original_length = len(audio)
         
-        # Ensure audio is exactly max_length
-        if len(audio) > self.max_length:
-            audio = audio[:self.max_length]
-            original_length = self.max_length
-        elif len(audio) < self.max_length:
-            audio = np.pad(audio, (0, self.max_length - len(audio)))
+        # When chunking is enabled, all samples should be chunk_length for consistent batching
+        # When chunking is disabled, use max_length
+        target_length = self.chunk_length if self.enable_chunking else self.max_length
+        
+        # Ensure audio is exactly target_length
+        if len(audio) > target_length:
+            audio = audio[:target_length]
+            original_length = target_length
+        elif len(audio) < target_length:
+            audio = np.pad(audio, (0, target_length - len(audio)))
         
         # Process with model processor
         inputs = self.processor(
@@ -1112,7 +1285,7 @@ class UnifiedAccentDatasetTorch(Dataset):
         
         # Create proper attention mask manually since Wav2Vec2Processor doesn't provide one
         attention_mask = torch.ones(inputs.input_values.size(-1), dtype=torch.float32)
-        if original_length < self.max_length:
+        if original_length < target_length:
             # Zero out the padded region
             attention_mask[original_length:] = 0.0
         
@@ -1122,7 +1295,7 @@ class UnifiedAccentDatasetTorch(Dataset):
             'input_values': inputs.input_values.squeeze(),
             'attention_mask': attention_mask,
             'labels': torch.tensor(label, dtype=torch.long),
-            'sample_id': sample.sample_id
+            'sample_id': sample_id
         }
 
 

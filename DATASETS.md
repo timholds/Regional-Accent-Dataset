@@ -3,6 +3,15 @@
 ## New Dataset Acquisition
 New datasets should have samples that are native english speakers. The data sources should be free of copyright restrictions and have licenses that are compatible with use in this project.
 
+### Audio Chunking for Long-Form Content
+The pipeline automatically handles long-form audio (interviews, conversations) through intelligent chunking:
+- **Default chunk size**: 7.5 seconds (120,000 samples at 16kHz - optimal for Wav2Vec2)
+- **Overlap**: 2.5 seconds between chunks (40,000 samples - preserves context at boundaries)
+- **Lazy chunking**: Audio lengths are checked only when accessed, not at initialization
+- **Automatic processing**: Long audio from CORAAL, SBCSAE, etc. is chunked during training
+- **Efficient**: Uses soundfile to read audio metadata without loading full files
+- **Random selection**: For multi-chunk files, randomly selects chunks each epoch for variety
+
 ## Overview
 
 This document describes all datasets supported by the unified accent classification pipeline. Each dataset can be included via the `prepare_dataset.py` script.
@@ -235,10 +244,11 @@ All datasets map to these 8 US regions:
 
 ### Overview
 - **Source**: University of Oregon
-- **Size**: ~150 speakers
+- **Size**: ~220+ speakers (v2023.06)
 - **Focus**: African American English varieties
 - **Audio**: Long sociolinguistic interviews (30-60 min)
 - **Format**: 44.1kHz WAV
+- **Latest Version**: 2023.06 (includes Detroit component)
 
 ### Data Structure
 ```
@@ -254,15 +264,16 @@ All datasets map to these 8 US regions:
 ```
 
 ### Components
-| Code | City | State | Our Region |
-|------|------|-------|------------|
-| DCA | Washington DC | DC | Mid-Atlantic |
-| DCB | Washington DC | DC | Mid-Atlantic |
-| ATL | Atlanta | GA | Deep South |
-| PRV | Princeville | NC | South Atlantic |
-| VLD | Valdosta | GA | Deep South |
-| ROC | Rochester | NY | New York Metropolitan |
-| LES | Lower East Side | NY | New York Metropolitan |
+| Code | City | State | Our Region | Status |
+|------|------|-------|------------|---------|
+| DCA | Washington DC | DC | Mid-Atlantic | ✅ Available |
+| DCB | Washington DC | DC | Mid-Atlantic | ✅ Available |
+| ATL | Atlanta | GA | Deep South | ✅ Available |
+| PRV | Princeville | NC | South Atlantic | ✅ Available |
+| VLD | Valdosta | GA | Deep South | ❌ No files found |
+| ROC | Rochester | NY | New York Metropolitan | ✅ Available |
+| LES | Lower East Side | NY | New York Metropolitan | ✅ Available |
+| DTA | Detroit | MI | Upper Midwest | ✅ Available |
 
 ### Metadata
 - **Naming**: `COMPONENT_speaker_interviewer.wav`
@@ -292,15 +303,24 @@ All datasets map to these 8 US regions:
 
 ---
 
-## 6. SBCSAE - Santa Barbara Corpus of Spoken American English
+## 6. SBCSAE - Santa Barbara Corpus of Spoken American English ⚠️ NOT WORKING
+
+### ⚠️ CRITICAL STATUS - AUDIO FILES NOT AVAILABLE
+**Current Status: NO AUDIO FILES CAN BE AUTOMATICALLY DOWNLOADED**
+
+#### The Reality:
+- **Expected**: 60 audio files (SBC001.wav - SBC060.wav)
+- **Actually available**: **0 audio files**
+- **Auto-download success**: **FAILED**
+- **Transcripts downloaded**: 60 transcript files ✅
 
 ### Overview
 - **Source**: UC Santa Barbara Linguistics Department
-- **Size**: ~60 hours of natural conversation
+- **Size**: ~60 hours of natural conversation (WHEN AVAILABLE)
 - **Conversations**: 60 recorded conversations
 - **Speakers**: ~250 American English speakers
 - **Focus**: Natural conversational American English
-- **Audio**: High-quality recordings of unscripted conversations
+- **Audio**: High-quality recordings of unscripted conversations (REQUIRES MANUAL ACQUISITION)
 - **Format**: WAV files with time-aligned transcriptions
 
 ### Data Structure
@@ -346,18 +366,33 @@ Based on the 30 conversations currently mapped in the loader:
 - **Manual download**: Currently requires manual placement of files
 - **Auto-metadata**: Creates synthetic metadata for demonstration
 
-### Download Instructions
-1. Visit: https://www.linguistics.ucsb.edu/research/santa-barbara-corpus
-2. Download the audio files and transcripts
-3. Place WAV files in: `~/.cache/accent_datasets/sbcsae/`
-4. Place transcript files alongside audio files
+### Current Issues
+1. **No automatic download available** - Original Box.com URLs return HTML, not audio
+2. **TalkBank URLs don't work** - Expected paths return 404 errors
+3. **Requires paid LDC access** - Professional corpus licensing required
+4. **Manual acquisition only** - Users must obtain files themselves
 
-### Future Enhancements Needed
-- Implement automatic download from UCSB servers
-- Parse full 60-conversation corpus metadata
-- Extract speaker segments from multi-speaker conversations
-- Integrate time-aligned transcriptions
-- Add speaker diarization for multi-speaker files
+### Download Instructions (MANUAL ONLY)
+**Option 1: Linguistic Data Consortium (LDC) - PAID ACCESS**
+1. Visit: https://www.ldc.upenn.edu/
+2. Search for "Santa Barbara Corpus"
+3. Purchase Parts 1-4: LDC2000S85, LDC2003S06, LDC2004S09, LDC2005S25
+4. Place WAV files as: `~/.cache/accent_datasets/sbcsae/SBC001.wav`, etc.
+
+**Option 2: UCSB Direct (if available)**
+1. Visit: https://www.linguistics.ucsb.edu/research/santa-barbara-corpus
+2. Check for direct download links (availability varies)
+3. Download audio files manually
+4. Place WAV files in: `~/.cache/accent_datasets/sbcsae/`
+
+### Contributing 0 Samples Currently
+**Until audio files are manually placed, SBCSAE contributes 0 samples to training.**
+
+The loader will:
+- ✅ Create metadata for all 120 speakers
+- ✅ Show clear instructions for obtaining audio
+- ✅ Not crash when audio files are missing
+- ❌ Actually provide any training data
 
 ---
 
@@ -417,23 +452,28 @@ choices=["TIMIT", "CommonVoice", "CORAAL", "SAA", "PNC", "MyDataset"]
 
 ## Dataset Statistics
 
-### Current Distribution (TIMIT + SAA)
+### Current Distribution (TIMIT + SAA + CORAAL)
 
-| Region | TIMIT | SAA | Total | % of Dataset |
-|--------|-------|-----|-------|--------------|
-| Deep South | 1,980 | 0 | 1,980 | 26.4% |
-| West | 1,330 | 25 | 1,355 | 18.1% |
-| Upper Midwest | 1,020 | 3 | 1,023 | 13.6% |
-| Lower Midwest | 1,020 | 0 | 1,020 | 13.6% |
-| **South Atlantic** | 0 | 707 | 707 | 9.4% |
-| New York Metropolitan | 460 | 67 | 527 | 7.0% |
-| New England | 490 | 14 | 504 | 6.7% |
-| **Mid-Atlantic** | 0 | 381 | 381 | 5.1% |
-| **Total** | 6,300 | 1,197 | 7,497 | 100% |
+| Region | TIMIT | SAA | CORAAL* | Total | % of Dataset |
+|--------|-------|-----|---------|-------|--------------|
+| Deep South | 1,980 | 0 | ~150 | 2,130 | ~24% |
+| West | 1,330 | 25 | 0 | 1,355 | ~15% |
+| Upper Midwest | 1,020 | 3 | ~40 | 1,063 | ~12% |
+| Lower Midwest | 1,020 | 0 | 0 | 1,020 | ~11% |
+| **South Atlantic** | 0 | 707 | ~50** | 757 | ~9% |
+| New York Metropolitan | 460 | 67 | ~60 | 587 | ~7% |
+| New England | 490 | 14 | 0 | 504 | ~6% |
+| **Mid-Atlantic** | 0 | 381 | ~80 | 461 | ~5% |
+
+*CORAAL estimates based on chunked long-form interviews (30-60 min per speaker)
+**PRV component now included for North Carolina coverage
 
 ### Key Insights
 - SAA fills critical gaps in Mid-Atlantic and South Atlantic
 - TIMIT provides strong coverage of other regions
+- **NEW: PRV component adds crucial North Carolina data for South Atlantic**
+- **NEW: DCB component doubles Mid-Atlantic coverage from DC**
+- **NEW: DTA component provides Detroit representation for Upper Midwest**
 - Combined dataset has representation for all 8 regions
 - No speaker overlap between train/val/test splits
 
