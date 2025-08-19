@@ -3,6 +3,54 @@
 ## New Dataset Acquisition
 New datasets should have samples that are native english speakers. The data sources should be free of copyright restrictions and have licenses that are compatible with use in this project.
 
+## Priority Datasets for Future Acquisition
+
+Based on analysis of current dataset limitations (birthplace-based labeling in SAA, limited samples ~10k total, 500k trainable parameters requiring more data), these are the **top 3 datasets** to prioritize for incorporation:
+
+### 1. **Nationwide Speech Project (NSP)** - HIGHEST PRIORITY
+- **Size**: 60 speakers × ~1 hour each = 60 hours of speech
+- **Regional Coverage**: 6 US dialect regions with explicit mapping (New England, Mid-Atlantic, North, Midland, South, West)
+- **Reliability**: ✅ **Excellent** - Speakers were carefully selected based on their regional background, recorded in controlled conditions
+- **Key Advantage**: Unlike SAA's birthplace-based labeling, NSP verified speakers' current regional dialect through linguistic analysis
+- **Access**: Through Linguistic Data Consortium (LDC2007S15) or direct contact with Ohio State University (Cynthia Clopper)
+- **Why critical**: Provides ground-truth regional labels with 10 speakers per region, addressing the accent drift issue where birthplace ≠ current accent
+- **Recording Quality**: High-quality digital recordings in sound-attenuated booth
+- **Materials**: Words, sentences, passages, and interviews
+
+### 2. **DARE Audio Project** - FREE ACCESS
+- **Size**: 1,843 recordings, ~900 hours of conversation (massive scale)
+- **Regional Coverage**: 1,002 communities across all US states
+- **Reliability**: ✅ **Excellent** - Recordings include geographic location where interview took place (not just birthplace)
+- **Key Advantage**: Verified recording locations, includes both casual conversation and standardized reading passages ("Arthur the Rat")
+- **Access**: **FREE** through University of Wisconsin Digital Collections (https://dare.wisc.edu/audio/)
+- **Why critical**: Recordings from 1965-1970 capture authentic regional dialects before modern accent leveling, with actual recording location metadata
+- **Unique Value**: Historical preservation of accents that may have since evolved or disappeared
+- **Searchable**: Database searchable by topics, biographical, or geographical characteristics
+
+### 3. **SLAAP North Carolina Collection** - ADDRESSES SOUTH ATLANTIC GAP
+- **Size**: Multiple NC datasets including:
+  - Asheville: 46 recordings (1974, 19 African American speakers)
+  - Roanoke Island: 35 recordings (2003)
+  - Robeson County: 23+ recordings
+- **Regional Coverage**: Specifically targets South Atlantic region (currently only 0.6% of our dataset)
+- **Reliability**: ✅ **Excellent** - Sociolinguistic interviews with verified local speakers
+- **Key Advantage**: Directly addresses the South Atlantic gap with 100+ North Carolina speakers
+- **Access**: Through NC State University SLAAP archive (https://slaap.chass.ncsu.edu/) - password-protected but accessible
+- **Why critical**: Would increase South Atlantic representation from 50 to ~500+ samples after chunking
+- **Additional Value**: Professional sociolinguistic curation with demographic metadata
+
+### Why These Three Over Others:
+- **Not More CommonVoice**: Self-reported accent labels remain unreliable regardless of volume
+- **Not VoxCeleb**: No US regional metadata, only nationality-level labels
+- **Not IARPA BABEL**: Focuses on non-English underserved languages
+- **Not More SAA Data**: Still relies on birthplace rather than current accent location
+
+### Expected Impact:
+- **Combined addition**: 1000+ hours of verified regional speech data
+- **South Atlantic coverage**: Increase from 0.6% to ~10-15% of dataset
+- **Ground truth improvement**: Recording location data instead of birthplace assumptions
+- **Historical diversity**: DARE provides 1960s accents, complementing modern recordings
+
 ### Audio Chunking for Long-Form Content
 The pipeline automatically handles long-form audio (interviews, conversations) through intelligent chunking:
 - **Default chunk size**: 7.5 seconds (120,000 samples at 16kHz - optimal for Wav2Vec2)
@@ -124,10 +172,20 @@ All datasets map to these 8 US regions:
 | `gender` | female | male/female |
 | `audio_file` | english123.mp3 | Audio filename |
 
+### ⚠️ IMPORTANT WARNING: Birthplace vs. Accent Origin
+**This dataset uses BIRTHPLACE for region labeling, NOT where speakers were raised or acquired their accent.** This is a fundamental limitation because:
+- Accents are primarily acquired during childhood (ages 3-12), not at birth
+- Many people move during childhood and develop accents different from their birthplace
+- A person born in Texas but raised in Boston will likely have a Boston accent, not a Texas accent
+- This mislabeling can introduce significant noise into accent classification models
+
+**Recommendation**: Use SAA samples with caution and consider them as supplementary data rather than ground truth. When possible, prefer datasets like TIMIT or CORAAL that have more reliable regional associations.
+
 ### Regional Mapping
 - Maps `birthplace_state` to our 8 regions using `MEDIUM_MAPPINGS`
 - Filters: `birthplace_country == 'USA'` AND `native_language == 'English'`
 - Primary contribution: Mid-Atlantic (381) and South Atlantic (707) samples
+- **Note**: These regional labels may not reflect actual accent characteristics due to birthplace limitation
 
 ### Loader Implementation
 - **File**: `saa_loader.py`

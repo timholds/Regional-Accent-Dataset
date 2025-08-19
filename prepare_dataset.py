@@ -39,8 +39,8 @@ def parse_args():
     parser.add_argument(
         "--datasets", 
         nargs="+", 
-        default=["TIMIT", "FilteredCommonVoice", "CORAAL", "SAA", "SBCSAE"],
-        choices=["TIMIT", "CommonVoice", "FilteredCommonVoice", "CORAAL", "SAA", "SBCSAE"],
+        default=["TIMIT", "CommonVoice", "CORAAL", "SAA", "SBCSAE"],
+        choices=["TIMIT", "CommonVoice", "CORAAL", "SAA", "SBCSAE"],
         help="Datasets to include (default: ALL available free datasets)"
     )
     

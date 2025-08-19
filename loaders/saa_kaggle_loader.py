@@ -11,6 +11,10 @@ from typing import Dict, List
 import logging
 import re
 
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
 from unified_dataset import BaseDatasetLoader, UnifiedSample
 from region_mappings import get_region_for_state
 
@@ -55,9 +59,13 @@ class SAALoader(BaseDatasetLoader):
         df_with_audio = df[df['file_missing?'] == False].copy()
         logger.info(f"Found {len(df_with_audio)} samples with audio out of {len(df)} total")
         
-        # Filter for US samples only
-        us_df = df_with_audio[df_with_audio['country'] == 'usa'].copy()
-        logger.info(f"Found {len(us_df)} US speakers with audio")
+        # Filter for US samples with native English only
+        # We want native English speakers for accent classification
+        us_df = df_with_audio[
+            (df_with_audio['country'] == 'usa') & 
+            (df_with_audio['native_language'] == 'english')
+        ].copy()
+        logger.info(f"Found {len(us_df)} US native English speakers with audio")
         
         # Extract state from birthplace (format: "city, state, usa")
         def extract_state(birthplace):
@@ -91,22 +99,23 @@ class SAALoader(BaseDatasetLoader):
         
         us_df['state_abbr'] = us_df['birthplace'].apply(extract_state)
         
+        # Filter out samples where we couldn't extract state
+        samples_before = len(us_df)
+        us_df = us_df[us_df['state_abbr'].notna()].copy()
+        samples_removed = samples_before - len(us_df)
+        if samples_removed > 0:
+            logger.warning(f"Removed {samples_removed} samples with unextractable states")
+        
         # Map states to regions using canonical mappings
         us_df['region_mapped'] = us_df['state_abbr'].apply(
-            lambda state: get_region_for_state(state, classification='medium') if state else 'Unknown'
+            lambda state: get_region_for_state(state, classification='medium')
         )
         
         # Show distribution
         region_counts = us_df['region_mapped'].value_counts()
         logger.info("SAA Kaggle Regional distribution:")
         for region, count in region_counts.items():
-            if region != 'Unknown':
-                logger.info(f"  {region}: {count}")
-        
-        # Count unknowns
-        unknown_count = len(us_df[us_df['region_mapped'] == 'Unknown'])
-        if unknown_count > 0:
-            logger.warning(f"  {unknown_count} samples with unknown/unmapped regions")
+            logger.info(f"  {region}: {count}")
         
         unified_samples = []
         

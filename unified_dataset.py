@@ -301,204 +301,7 @@ class TIMITLoader(BaseDatasetLoader):
         }
 
 
-class CommonVoiceLoader(BaseDatasetLoader):
-    """Loader for Mozilla Common Voice dataset"""
-    
-    CV_VERSION = "cv-corpus-22.0-2025-06-20"  # Latest version as of 2025
-    CV_URL = "https://mozilla-common-voice-datasets.s3.dualstack.us-west-2.amazonaws.com/cv-corpus-22.0-2025-06-20/cv-corpus-22.0-2025-06-20-en.tar.gz"
-    
-    def download(self) -> bool:
-        """Download Common Voice dataset if not cached"""
-        cv_dir = self.cache_dir / "common_voice" / self.CV_VERSION
-        
-        if cv_dir.exists() and len(list(cv_dir.glob("*.tsv"))) > 0:
-            logger.info(f"Common Voice dataset found at {cv_dir}")
-            return True
-        
-        # Check if we need to download
-        tar_path = self.cache_dir / "common_voice" / f"{self.CV_VERSION}-en.tar.gz"
-        
-        if not tar_path.exists():
-            logger.info(f"Downloading Common Voice dataset (~2.5GB)...")
-            logger.info("This may take several minutes depending on your connection...")
-            
-            # Create directory
-            tar_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Download the dataset
-            try:
-                response = requests.get(self.CV_URL, stream=True)
-                response.raise_for_status()
-                
-                total_size = int(response.headers.get('content-length', 0))
-                with open(tar_path, 'wb') as f:
-                    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading CommonVoice") as pbar:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                                pbar.update(len(chunk))
-                
-                logger.info("CommonVoice download complete!")
-            except Exception as e:
-                logger.error(f"Failed to download CommonVoice: {e}")
-                logger.warning("You can manually download from https://commonvoice.mozilla.org/en/datasets")
-                if tar_path.exists():
-                    tar_path.unlink()  # Remove partial download
-                return False
-        
-        # Extract if needed
-        if not cv_dir.exists():
-            logger.info(f"Extracting Common Voice dataset...")
-            cv_dir.mkdir(parents=True, exist_ok=True)
-            
-            with tarfile.open(tar_path, 'r:gz') as tar:
-                # Extract only the English subset
-                for member in tar.getmembers():
-                    if member.name.startswith(f"{self.CV_VERSION}/en/"):
-                        member.name = member.name.replace(f"{self.CV_VERSION}/en/", "")
-                        tar.extract(member, cv_dir)
-            
-            logger.info("Extraction complete")
-        
-        return True
-    
-    def _parse_accent_label(self, accent_str: str) -> Tuple[str, str]:
-        """Parse Common Voice accent labels to our regions"""
-        if not accent_str or pd.isna(accent_str):
-            return 'West', 'Unknown'
-        
-        accent_lower = accent_str.lower()
-        
-        # US-specific accent patterns
-        us_accent_patterns = {
-            'New England': [
-                'new england', 'boston', 'maine', 'vermont', 'new hampshire',
-                'massachusetts', 'rhode island', 'connecticut'
-            ],
-            'New York Metropolitan': [
-                'new york', 'nyc', 'brooklyn', 'bronx', 'manhattan', 'queens',
-                'long island', 'new jersey', 'newark'
-            ],
-            'Mid-Atlantic': [
-                'mid-atlantic', 'mid atlantic', 'philadelphia', 'baltimore',
-                'washington', 'dc', 'maryland', 'delaware'
-            ],
-            'South Atlantic': [
-                'virginia', 'north carolina', 'south carolina', 'georgia', 
-                'florida', 'charleston', 'richmond'
-            ],
-            'Deep South': [
-                'southern', 'deep south', 'alabama', 'mississippi', 'louisiana',
-                'arkansas', 'tennessee', 'kentucky', 'atlanta', 'nashville',
-                'new orleans', 'memphis'
-            ],
-            'Midwest': [
-                'midwest', 'upper midwest', 'lower midwest', 'michigan', 'wisconsin', 'minnesota',
-                'chicago', 'detroit', 'milwaukee', 'twin cities', 'great lakes',
-                'ohio', 'indiana', 'illinois', 'missouri', 'iowa', 'nebraska',
-                'kansas', 'st louis', 'cincinnati', 'indianapolis'
-            ],
-            'West': [
-                'western', 'west coast', 'california', 'pacific', 'texas',
-                'colorado', 'arizona', 'nevada', 'utah', 'new mexico',
-                'washington', 'oregon', 'seattle', 'portland', 'los angeles',
-                'san francisco', 'denver', 'phoenix', 'las vegas'
-            ]
-        }
-        
-        # Check for US patterns
-        for region, patterns in us_accent_patterns.items():
-            if any(pattern in accent_lower for pattern in patterns):
-                return region, accent_str
-        
-        # Check if it's US English but region unspecified
-        us_indicators = ['united states', 'american', 'us english', 'usa']
-        if any(ind in accent_lower for ind in us_indicators):
-            return 'West', accent_str  # Default to West for unspecified US
-        
-        # Not US English
-        return None, accent_str
-    
-    def load(self) -> List[UnifiedSample]:
-        """Load Common Voice dataset"""
-        if not self.download():
-            return []
-        
-        cv_dir = self.cache_dir / "common_voice" / self.CV_VERSION
-        validated_tsv = cv_dir / "validated.tsv"
-        
-        if not validated_tsv.exists():
-            logger.error(f"Validated.tsv not found at {validated_tsv}")
-            return []
-        
-        logger.info("Loading Common Voice metadata...")
-        df = pd.read_csv(validated_tsv, sep='\t')
-        
-        # Filter for US accents only
-        logger.info(f"Total Common Voice samples: {len(df)}")
-        
-        unified_samples = []
-        clips_dir = cv_dir / "clips"
-        
-        # Process samples with US accents
-        us_samples = 0
-        for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing Common Voice"):
-            accent = row.get('accent', '')
-            region, original_accent = self._parse_accent_label(accent)
-            
-            if region is None:  # Skip non-US accents
-                continue
-            
-            # Build audio path
-            audio_path = clips_dir / row['path']
-            if not audio_path.exists():
-                audio_path = clips_dir / row['path'].replace('.mp3', '.wav')
-                if not audio_path.exists():
-                    continue
-            
-            sample = UnifiedSample(
-                sample_id=self._generate_sample_id('CommonVoice', row['client_id'], row['path']),
-                dataset_name='CommonVoice',
-                speaker_id=row['client_id'],
-                audio_path=str(audio_path),
-                transcript=row['sentence'],
-                region_label=region,
-                original_accent_label=original_accent,
-                gender=row.get('gender', 'U'),
-                age=row.get('age', None),
-                duration=row.get('duration', None),
-                is_validated=True  # We're using validated.tsv
-            )
-            
-            unified_samples.append(sample)
-            us_samples += 1
-            
-            # Remove testing limit - process all samples
-            # Note: This may take a while as v22.0 has millions of samples
-        
-        self.samples = unified_samples
-        logger.info(f"Loaded {len(unified_samples)} US samples from Common Voice")
-        
-        return unified_samples
-    
-    def get_dataset_info(self) -> Dict:
-        """Get Common Voice dataset statistics"""
-        if not self.samples:
-            self.load()
-        
-        df = pd.DataFrame([s.to_dict() for s in self.samples])
-        
-        if len(df) == 0:
-            return {'dataset': 'CommonVoice', 'status': 'No samples loaded'}
-        
-        return {
-            'dataset': 'CommonVoice',
-            'total_samples': len(self.samples),
-            'total_speakers': df['speaker_id'].nunique(),
-            'region_distribution': df['region_label'].value_counts().to_dict(),
-            'gender_distribution': df['gender'].value_counts().to_dict(),
-            'total_duration_hours': df['duration'].sum() / 3600 if 'duration' in df else 0
-        }
+# CommonVoiceLoader has been moved to loaders/commonvoice_loader.py
 
 
 class CORAALLoader(BaseDatasetLoader):
@@ -728,7 +531,7 @@ class UnifiedAccentDataset:
         
         # Import SAA loader if available (use Kaggle version for complete dataset)
         try:
-            from saa_kaggle_loader import SAALoader
+            from loaders.saa_kaggle_loader import SAALoader
             saa_loader = SAALoader(data_root, cache_dir)
         except ImportError:
             logger.warning("SAA loader not available")
@@ -737,22 +540,21 @@ class UnifiedAccentDataset:
         
         # Import SBCSAE loader if available
         try:
-            from sbcsae_loader import SBCSAELoader
+            from loaders.sbcsae_loader import SBCSAELoader
             sbcsae_loader = SBCSAELoader(data_root, cache_dir)
         except ImportError:
             logger.warning("SBCSAE loader not available")
             sbcsae_loader = None
         
         try:
-            from commonvoice_filtered_loader import FilteredCommonVoiceLoader
-            filtered_cv_loader = FilteredCommonVoiceLoader(data_root, cache_dir)
+            from loaders.commonvoice_loader import CommonVoiceLoader
+            cv_loader = CommonVoiceLoader(data_root, cache_dir)
         except ImportError:
-            logger.warning("FilteredCommonVoice loader not available")
-            filtered_cv_loader = None
+            logger.warning("CommonVoice loader not available")
+            cv_loader = None
         
         self.loaders = {
             'TIMIT': TIMITLoader(data_root, cache_dir),
-            'CommonVoice': CommonVoiceLoader(data_root, cache_dir),
             'CORAAL': CORAALLoader(data_root, cache_dir),
         }
         
@@ -764,9 +566,9 @@ class UnifiedAccentDataset:
         if sbcsae_loader:
             self.loaders['SBCSAE'] = sbcsae_loader
         
-        # Add FilteredCommonVoice loader if available
-        if filtered_cv_loader:
-            self.loaders['FilteredCommonVoice'] = filtered_cv_loader
+        # Add CommonVoice loader if available
+        if cv_loader:
+            self.loaders['CommonVoice'] = cv_loader
         
         self.all_samples: List[UnifiedSample] = []
         self.metadata_file = self.cache_dir / 'unified_metadata.json'

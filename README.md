@@ -108,22 +108,44 @@ We keep the original labels too in case we need to debug why something got mappe
 ## Project Structure
 
 ```
-regional-accent/
-├── prepare_dataset.py          # Prepares unified dataset
-├── train_accent_classifier.py  # Training script
-├── unified_dataset.py          # Dataset loading/unification
-├── region_mappings.py          # State → Region mappings
-├── audio_data_analysis.py      # Audio compatibility checks
-└── data/                       # Downloaded datasets (after cleanup)
-    ├── timit_docs/             # TIMIT documentation files
-    ├── TRAIN/                  # Training audio data
-    │   ├── DR1/                # Dialect regions DR1-DR8
-    │   └── ...                 # Each contains speaker folders
-    ├── TEST/                   # Test audio data
-    │   ├── DR1/                # Same structure as TRAIN
-    │   └── ...
-    ├── CommonVoice/
-    └── CORAAL/
+Regional-Accent-Dataset/
+├── Core Scripts
+│   ├── prepare_dataset.py          # Prepares unified dataset from multiple sources
+│   ├── train_accent_classifier.py  # Main training script with optimizations
+│   ├── unified_dataset.py          # Dataset orchestrator and unification logic
+│   ├── optimized_dataset.py        # Optimized dataset wrapper for training
+│   └── region_mappings.py          # State → Region mapping definitions
+│
+├── loaders/                         # Dataset-specific loaders
+│   ├── timit_loader.py             # TIMIT dataset loader
+│   └── saa_kaggle_loader.py        # Speech Accent Archive loader (Kaggle version)
+│
+├── scripts/
+│   └── download/                   # Dataset download utilities
+│       ├── download_coraal.py      # Download CORAAL components
+│       ├── download_real_sbcsae.py # Download SBCSAE data
+│       └── download_full_coraal.sh # Batch download script
+│
+├── Documentation
+│   ├── README.md                   # This file
+│   ├── DATASETS.md                 # Detailed dataset documentation
+│   ├── PROJECT_NOTES.md            # Development notes and optimizations
+│   └── CLAUDE.md                   # AI assistant instructions
+│
+├── prepared_datasets/               # Output from prepare_dataset.py
+│   └── accent_dataset_*/           # Timestamped dataset versions
+│       ├── train.csv                # Training samples
+│       ├── val.csv                  # Validation samples
+│       ├── test.csv                 # Test samples
+│       ├── metadata.json            # Dataset statistics
+│       └── config.json              # Loading configuration
+│
+└── ~/.cache/accent_datasets/        # Downloaded/cached datasets (in home directory)
+    ├── timit/                      # TIMIT audio files
+    ├── coraal/                     # CORAAL components  
+    ├── saa/                        # Speech Accent Archive
+    ├── common_voice/               # Common Voice data
+    └── sbcsae/                     # Santa Barbara Corpus
 ```
 
 Note: Run `cleanup_timit_data.py` after downloading TIMIT to fix the nested directory structure and remove duplicate `.WAV.wav` files.
