@@ -30,6 +30,23 @@ Understanding the relationship between model size and dataset size is crucial fo
 - Our current 19.5M trainable params is ~5x too many for our dataset size
 - The original Wav2Vec2 had 260x more data but only 5x more parameters
 
+## Training Performance Optimizations
+
+### Speed Improvements (4.3x faster)
+Successfully optimized training from 2 seconds per batch down to 0.47 seconds per batch:
+
+1. **TensorFloat-32 (TF32)** - Enabled for RTX/Ampere GPUs
+   - `torch.backends.cuda.matmul.allow_tf32 = True`
+   - `torch.backends.cudnn.allow_tf32 = True`
+
+2. **Reduced dataloader workers** - Changed from 8 to 4 workers (compute-bound task)
+
+3. **torch.compile()** - Enabled by default on PyTorch 2.0+ (use `--no_compile` to disable)
+
+4. **Dynamic evaluation batch size** - Defaults to same as training batch size for stability
+
+**Key Finding:** The bottleneck was model computation, not data loading. TF32 provides significant speedup on modern GPUs, and fewer dataloader workers are better for compute-bound tasks.
+
 ## Models to train
 Frozen wav2vec with a classifier head on top
 - to check if we can map the features directly to a linearly seperable space

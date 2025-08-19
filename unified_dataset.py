@@ -241,7 +241,7 @@ class TIMITLoader(BaseDatasetLoader):
         if not self.download():
             return []
             
-        from timit_dataset import TimitDatasetLoader, TIMIT_REGIONS
+        from loaders.timit_loader import TimitDatasetLoader, TIMIT_REGIONS
         
         logger.info("Loading TIMIT dataset...")
         loader = TimitDatasetLoader(str(self.cache_dir / 'timit'))
@@ -726,9 +726,9 @@ class UnifiedAccentDataset:
         self.cache_dir = Path(cache_dir).expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Import SAA loader if available
+        # Import SAA loader if available (use Kaggle version for complete dataset)
         try:
-            from saa_loader import SAALoader
+            from saa_kaggle_loader import SAALoader
             saa_loader = SAALoader(data_root, cache_dir)
         except ImportError:
             logger.warning("SAA loader not available")

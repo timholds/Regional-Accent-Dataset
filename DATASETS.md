@@ -304,13 +304,26 @@ All datasets map to these 8 US regions:
 | Code | City | State | Our Region | Audio Files | Status |
 |------|------|-------|------------|-------------|--------|
 | DCA | Washington DC | DC | Mid-Atlantic | Multiple | ✅ Available |
-| DCB | Washington DC | DC | Mid-Atlantic | In temp_DCB | ✅ Available |
+| DCB | Washington DC | DC | Mid-Atlantic | Part 1 | ✅ Available |
 | ATL | Atlanta | GA | Deep South | Multiple | ✅ Available |
-| PRV | Princeville | NC | South Atlantic | 4 files | ✅ Available |
+| PRV | Princeville | NC | South Atlantic | Part 1 | ✅ **Critical for NC coverage** |
 | VLD | Valdosta | GA | Deep South | 0 | ❌ Not found |
 | ROC | Rochester | NY | New York Metropolitan | Multiple | ✅ Available |
 | LES | Lower East Side | NY | New York Metropolitan | Multiple | ✅ Available |
-| DTA | Detroit | MI | Upper Midwest | 8 files | ✅ Available |
+| DTA | Detroit | MI | Upper Midwest | Part 1 | ✅ Available |
+
+#### Important Discovery: Missing CORAAL Components
+During analysis, we discovered that PRV (Princeville, NC) and DCB (Washington DC) components were not included in the original CORAAL_COMPONENTS dictionary despite being available. These have now been added:
+
+**PRV Component (Critical for South Atlantic):**
+- URL: `https://lingtools.uoregon.edu/coraal/prv/2018.10.06/PRV_audio_part01_2018.10.06.tar.gz`
+- Impact: Adds 30-50 speakers from North Carolina
+- Expected samples after chunking: +500-1000 for South Atlantic region
+- This more than doubles South Atlantic coverage (from 707 to ~1,700 samples)
+
+**DCB Component (Enhances Mid-Atlantic):**
+- URL: `https://lingtools.uoregon.edu/coraal/dcb/2018.10.06/DCB_audio_part01_2018.10.06.tar.gz`
+- Impact: Additional Washington DC speakers to complement DCA
 
 ### Metadata
 - **Naming**: `COMPONENT_speaker_interviewer.wav`
@@ -499,11 +512,17 @@ choices=["TIMIT", "CommonVoice", "CORAAL", "SAA", "PNC", "MyDataset"]
 | Deep South | 2,151 | 24.3% | TIMIT, FilteredCommonVoice, CORAAL |
 | West | 1,751 | 19.8% | TIMIT, FilteredCommonVoice, SAA |
 | New York Metropolitan | 811 | 9.2% | TIMIT, FilteredCommonVoice, CORAAL |
-| Mid-Atlantic | 603 | 6.8% | SAA, CORAAL, FilteredCommonVoice |
+| Mid-Atlantic | 603 | 6.8% | SAA, CORAAL (DCA, DCB), FilteredCommonVoice |
 | New England | 560 | 6.3% | TIMIT, FilteredCommonVoice |
 | South Atlantic | 50 | 0.6% | CORAAL (PRV), FilteredCommonVoice |
 
 *Upper Midwest and Lower Midwest have been consolidated into a single "Midwest" region
+
+#### ⚠️ Regional Imbalance Issue
+**South Atlantic region severely underrepresented (0.6% of dataset)**
+- Current: Only 50 samples from limited sources
+- After PRV integration: Expected to increase to ~1,700 samples (15% of dataset)
+- This represents a 140% increase in South Atlantic coverage
 
 **Key improvements from latest dataset:**
 - FilteredCommonVoice successfully contributes 5,558 regional samples
@@ -514,11 +533,21 @@ choices=["TIMIT", "CommonVoice", "CORAAL", "SAA", "PNC", "MyDataset"]
 ### Key Insights
 - SAA fills critical gaps in Mid-Atlantic and South Atlantic
 - TIMIT provides strong coverage of other regions
-- **NEW: PRV component adds crucial North Carolina data for South Atlantic**
-- **NEW: DCB component doubles Mid-Atlantic coverage from DC**
-- **NEW: DTA component provides Detroit representation for Upper Midwest**
+- **PRV component (Princeville, NC) adds crucial North Carolina data for South Atlantic**
+- **DCB component doubles Mid-Atlantic coverage from DC**
+- **DTA component provides Detroit representation for Upper Midwest**
 - Combined dataset has representation for all 8 regions
 - No speaker overlap between train/val/test splits
+
+### Action Items for Regional Balance
+1. **Priority #1**: Ensure PRV component is downloaded and integrated
+   ```bash
+   python download_coraal.py PRV
+   ```
+2. **Alternative South Atlantic sources** if PRV issues persist:
+   - SLAAP (NC State) - Asheville dataset with 46 NC recordings
+   - Re-map ATL component from Deep South to South Atlantic (Georgia is technically South Atlantic)
+   - Expand SAA collection for VA, NC, SC, GA, FL speakers
 
 ---
 
