@@ -30,28 +30,35 @@ class CommonVoiceLoader(BaseDatasetLoader):
                       'rhode island', 'connecticut'],
             'cities': ['boston', 'cambridge', 'providence', 'hartford', 
                       'burlington', 'portland maine', 'worcester', 'springfield mass'],
-            'regions': ['new england']
+            'regions': ['new england', 'northeast', 'northeastern'],
+            'abbreviations': [' ma ', ' me ', ' vt ', ' nh ', ' ri ', ' ct ']
         },
         'New York Metropolitan': {
             'states': ['new york', 'new jersey'],
             'cities': ['new york city', 'nyc', 'brooklyn', 'manhattan', 'queens', 
                       'bronx', 'staten island', 'long island', 'newark', 
                       'jersey city', 'buffalo', 'rochester', 'albany', 'syracuse'],
-            'regions': ['new york metropolitan', 'upstate new york', 'downstate new york']
+            'regions': ['new york metropolitan', 'upstate new york', 'downstate new york',
+                       'tri-state', 'tristate'],
+            'abbreviations': [' ny ', ' nj ', 'n.y.', 'n.j.']
         },
         'Mid-Atlantic': {
             'states': ['pennsylvania', 'maryland', 'delaware', 'washington dc', 
                       'district of columbia'],
             'cities': ['philadelphia', 'pittsburgh', 'baltimore', 'harrisburg', 
                       'wilmington', 'dover', 'allentown', 'erie', 'scranton'],
-            'regions': ['mid-atlantic', 'mid atlantic', 'dc area', 'dmv area']
+            'regions': ['mid-atlantic', 'mid atlantic', 'dc area', 'dmv area', 
+                       'delmarva', 'philly area'],
+            'abbreviations': [' pa ', ' md ', ' de ', ' dc ', 'd.c.']
         },
         'South Atlantic': {
             'states': ['virginia', 'north carolina', 'south carolina', 'georgia', 'florida'],
             'cities': ['richmond', 'norfolk', 'virginia beach', 'charlotte', 'raleigh', 
                       'charleston', 'columbia', 'atlanta', 'savannah', 'augusta',
                       'miami', 'orlando', 'tampa', 'jacksonville', 'tallahassee'],
-            'regions': ['south atlantic', 'carolinas']
+            'regions': ['south atlantic', 'carolinas', 'southeast', 'southeastern',
+                       'south east', 'panhandle'],
+            'abbreviations': [' va ', ' nc ', ' sc ', ' ga ', ' fl ', 'n.c.', 's.c.']
         },
         'Deep South': {
             'states': ['alabama', 'mississippi', 'louisiana', 'tennessee', 
@@ -59,7 +66,9 @@ class CommonVoiceLoader(BaseDatasetLoader):
             'cities': ['birmingham', 'montgomery', 'jackson', 'new orleans', 'baton rouge',
                       'memphis', 'nashville', 'knoxville', 'louisville', 'lexington',
                       'little rock', 'mobile', 'shreveport'],
-            'regions': ['deep south', 'southern united states', 'gulf coast']
+            'regions': ['deep south', 'southern united states', 'gulf coast', 'dixie',
+                       'bible belt', 'southern', 'the south', 'gulf states', 'bayou'],
+            'abbreviations': [' al ', ' ms ', ' la ', ' tn ', ' ky ', ' ar ']
         },
         'Midwest': {
             'states': ['ohio', 'michigan', 'indiana', 'illinois', 'wisconsin', 
@@ -71,7 +80,10 @@ class CommonVoiceLoader(BaseDatasetLoader):
                       'grand rapids', 'dayton', 'toledo', 'akron'],
             'regions': ['midwest', 'midwestern', 'upper midwest', 'lower midwest', 
                        'great lakes', 'rust belt', 'unite states midwest',  # typo in data
-                       'midwestern united states', 'midwestern usa']
+                       'midwestern united states', 'midwestern usa', 'heartland',
+                       'corn belt', 'plains', 'great plains', 'prairie'],
+            'abbreviations': [' oh ', ' mi ', ' in ', ' il ', ' wi ', ' mn ', ' ia ',
+                            ' mo ', ' nd ', ' sd ', ' ne ', ' ks ']
         },
         'West': {
             'states': ['california', 'texas', 'washington', 'oregon', 'nevada', 
@@ -87,28 +99,30 @@ class CommonVoiceLoader(BaseDatasetLoader):
             'regions': ['west coast', 'pacific northwest', 'southwest', 'southwestern',
                        'western united states', 'california', 'southern california', 
                        'northern california', 'bay area', 'silicon valley',
-                       'texas', 'west texas', 'south texas', 'pacific']
+                       'texas', 'west texas', 'south texas', 'pacific', 'pnw',
+                       'socal', 'norcal', 'mountain west', 'rocky mountains',
+                       'desert southwest', 'four corners', 'frontier'],
+            'abbreviations': [' ca ', ' tx ', ' wa ', ' or ', ' nv ', ' az ', ' co ',
+                            ' ut ', ' nm ', ' id ', ' mt ', ' wy ', ' ak ', ' hi ', ' ok ',
+                            'l.a.', 's.f.', 'n.m.']
         }
     }
     
-    # Reject patterns for non-US or non-native speakers
-    # We want native US English speakers only
+    # Reject patterns for clearly non-US or non-native speakers
+    # More lenient to allow ethnic-American combinations
     REJECT_PATTERNS = [
-        # Non-US English varieties
-        'england english', 'british', 'uk english', 'united kingdom', 
-        'australian', 'canadian english', 'scottish english', 'irish english', 
-        'welsh english', 'new zealand', 'south africa', 'southern african',
-        # Non-English native languages / accents
-        'german english', 'scandinavian', 'filipino', 'india and south asia', 
-        'pakistani', 'caribbean', 'african', 'asian english', 'european',
-        'chinese', 'japanese', 'arabic', 'hindi', 'vietnamese', 'korean',
-        'french', 'italian', 'russian', 'spanish', 'mexican', 'latino',
-        'turkish', 'polish', 'dutch', 'portuguese', 'swedish', 'norwegian',
-        # Language learning status
-        'non-native', 'non native', 'second language', 'esl', 'foreign',
-        'immigrant', 'international', 'bilingual',
-        # Mixed/unclear
-        'transatlantic', 'mixed', 'blend', 'combination', 'mix of'
+        # Non-US English varieties (clear indicators)
+        'england english', 'british english', 'uk english', 'united kingdom', 
+        'australian english', 'canadian english', 'scottish english', 'irish english', 
+        'welsh english', 'new zealand english', 'south african english',
+        # Non-English as primary language (clear indicators)
+        'india and south asia', 'filipino english', 'caribbean english',
+        'african english', 'asian english', 'european english',
+        # Clear non-native indicators
+        'non-native', 'non native', 'second language', 'esl', 'foreign accent',
+        'learning english', 'english learner',
+        # Only reject if clearly not US-based
+        'international student', 'recently immigrated', 'new to english'
     ]
     
     def download(self) -> bool:
@@ -190,6 +204,13 @@ class CommonVoiceLoader(BaseDatasetLoader):
                     if region_name in part:
                         score += 1  # Regional names get lower weight
                         matches.append(f"region:{region_name}")
+                
+                # Check abbreviations (medium-high confidence)
+                if 'abbreviations' in geographic_data:
+                    for abbrev in geographic_data['abbreviations']:
+                        if abbrev in part or abbrev.strip() in part:
+                            score += 2  # Abbreviations get medium-high weight
+                            matches.append(f"abbrev:{abbrev.strip()}")
             
             if score > 0:
                 region_scores[region] = (score, matches)
@@ -260,6 +281,8 @@ class CommonVoiceLoader(BaseDatasetLoader):
             geographic_keywords.extend([s.lower() for s in region_data['states']])
             geographic_keywords.extend([c.lower() for c in region_data['cities']])
             geographic_keywords.extend([r.lower() for r in region_data['regions']])
+            if 'abbreviations' in region_data:
+                geographic_keywords.extend([a.lower().strip() for a in region_data['abbreviations']])
         
         # Create a regex pattern for fast pre-filtering
         pattern = '|'.join(geographic_keywords)
