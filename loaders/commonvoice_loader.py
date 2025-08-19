@@ -91,32 +91,24 @@ class CommonVoiceLoader(BaseDatasetLoader):
         }
     }
     
-    # Patterns that immediately disqualify a sample
+    # Reject patterns for non-US or non-native speakers
+    # We want native US English speakers only
     REJECT_PATTERNS = [
-        # Non-US locations
-        'england', 'british', 'uk', 'united kingdom', 'australian', 'canadian', 
-        'scottish', 'irish', 'welsh', 'new zealand', 'south africa',
-        # Languages/nationalities
-        'german', 'scandinavian', 'filipino', 'indian', 'pakistani', 
-        'caribbean', 'african', 'asian', 'european', 'latino', 'hispanic', 
-        'mexican', 'spanish', 'french', 'italian', 'russian', 'chinese', 
-        'japanese', 'arabic', 'hindi', 'vietnamese', 'korean',
+        # Non-US English varieties
+        'england english', 'british', 'uk english', 'united kingdom', 
+        'australian', 'canadian english', 'scottish english', 'irish english', 
+        'welsh english', 'new zealand', 'south africa', 'southern african',
+        # Non-English native languages / accents
+        'german english', 'scandinavian', 'filipino', 'india and south asia', 
+        'pakistani', 'caribbean', 'african', 'asian english', 'european',
+        'chinese', 'japanese', 'arabic', 'hindi', 'vietnamese', 'korean',
+        'french', 'italian', 'russian', 'spanish', 'mexican', 'latino',
+        'turkish', 'polish', 'dutch', 'portuguese', 'swedish', 'norwegian',
         # Language learning status
         'non-native', 'non native', 'second language', 'esl', 'foreign',
         'immigrant', 'international', 'bilingual',
-        # Mixed/ambiguous
-        'transatlantic', 'mixed', 'blend', 'combination', 'mix of',
-        # Speech conditions
-        'speech impediment', 'lisp', 'stutter', 'impediment', 'disorder',
-        'rhotacism', 'deaf', 'hearing',
-        # Subjective/cultural descriptors (NOT geographic)
-        'gay', 'queer', 'effeminate', 'masculine', 'feminine',
-        'low', 'high', 'demure', 'loud', 'soft', 'nasal',
-        # Linguistic markers we're explicitly avoiding
-        "y'all", 'drawl', 'twang', 'accent', 'dialect',
-        # Education/class markers (not geographic)
-        'educated', 'university', 'college', 'harvard', 'yale',
-        'working class', 'upper class'
+        # Mixed/unclear
+        'transatlantic', 'mixed', 'blend', 'combination', 'mix of'
     ]
     
     def download(self) -> bool:
@@ -250,48 +242,40 @@ class CommonVoiceLoader(BaseDatasetLoader):
         logger.info(f"Loading CommonVoice from {self.cv_path}")
         logger.info("Using GEOGRAPHIC indicators only (no linguistic markers)...")
         
-        # Read the TSV file with optimizations:
-        # 1. Only load necessary columns to reduce memory
-        # 2. Filter early to avoid processing irrelevant rows
+        # Read the TSV file - only load necessary columns to reduce memory
         needed_columns = ['client_id', 'path', 'sentence', 'up_votes', 'down_votes', 
                          'accents', 'gender', 'age']
         
-        # First pass: read only accents column to pre-filter
+        logger.info("Loading CommonVoice samples...")
+        df = pd.read_csv(validated_tsv, sep='\t', usecols=needed_columns,
+                        dtype={'accents': str})
+        logger.info(f"Total CommonVoice samples: {len(df):,}")
+        
         logger.info("Pre-filtering CommonVoice samples for geographic indicators...")
-        accents_df = pd.read_csv(validated_tsv, sep='\t', usecols=['accents'], 
-                                 dtype={'accents': str})
         
         # Build a mask for rows that might have geographic content
-        # This dramatically reduces the rows we need to fully process
+        # This dramatically reduces the dataset we need to process (from 1.8M to ~6k)
         geographic_keywords = []
         for region_data in self.REGIONAL_PATTERNS.values():
-            geographic_keywords.extend(region_data['states'])
-            geographic_keywords.extend(region_data['cities'])
-            geographic_keywords.extend(region_data['regions'])
+            geographic_keywords.extend([s.lower() for s in region_data['states']])
+            geographic_keywords.extend([c.lower() for c in region_data['cities']])
+            geographic_keywords.extend([r.lower() for r in region_data['regions']])
         
-        # Create mask for potentially relevant rows
-        accents_lower = accents_df['accents'].fillna('').str.lower()
-        potential_mask = accents_lower.str.contains('|'.join(geographic_keywords), 
-                                                    case=False, regex=True, na=False)
+        # Create a regex pattern for fast pre-filtering
+        pattern = '|'.join(geographic_keywords)
         
-        # Get indices of potentially relevant rows
-        relevant_indices = accents_df[potential_mask].index.tolist()
-        logger.info(f"Found {len(relevant_indices):,} potentially relevant rows out of {len(accents_df):,}")
+        # Pre-filter for potential geographic content
+        accent_mask = df['accents'].notna() & df['accents'].str.lower().str.contains(
+            pattern, na=False, regex=True
+        )
         
-        # Now read only the relevant rows with all needed columns
-        if len(relevant_indices) == 0:
-            logger.warning("No samples with geographic indicators found")
-            return []
+        # Filter to potentially relevant rows
+        filtered_df = df[accent_mask].copy()
+        logger.info(f"Found {len(filtered_df):,} potentially relevant rows out of {len(df):,}")
         
-        # Read only relevant rows - add 1 to indices since row 0 is header
-        relevant_row_numbers = [0] + [i + 1 for i in relevant_indices]  # Include header
-        df = pd.read_csv(validated_tsv, sep='\t', usecols=needed_columns,
-                        dtype={'accents': str}, skiprows=lambda x: x not in relevant_row_numbers)
-        logger.info(f"Loaded {len(df):,} samples with geographic keywords")
-        
-        # Apply quality filtering
-        quality_mask = df.apply(self._quality_check, axis=1)
-        quality_df = df[quality_mask]
+        # Now apply quality filtering to the pre-filtered set
+        quality_mask = filtered_df.apply(self._quality_check, axis=1)
+        quality_df = filtered_df[quality_mask]
         logger.info(f"After quality filtering: {len(quality_df):,} samples")
         
         unified_samples = []
