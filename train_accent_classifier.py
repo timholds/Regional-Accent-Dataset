@@ -29,6 +29,7 @@ import signal
 import sys
 import atexit
 import gc
+import math
 
 # Set matplotlib to non-interactive backend BEFORE importing pyplot
 import matplotlib
@@ -84,6 +85,122 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 atexit.register(cleanup_gpu)
+
+
+# Custom LoRA implementation for Wav2Vec2 (bypasses PEFT limitations)
+class LoRALayer(nn.Module):
+    """Custom LoRA layer implementation for Wav2Vec2."""
+    def __init__(self, in_features, out_features, rank=8, alpha=16):
+        super().__init__()
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        
+        # LoRA decomposition matrices
+        self.lora_A = nn.Parameter(torch.randn(rank, in_features) * 0.01)
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        
+        # Initialize
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+        
+    def forward(self, x):
+        # Apply low-rank adaptation: x @ A^T @ B^T * scaling
+        return (x @ self.lora_A.T @ self.lora_B.T) * self.scaling
+
+
+class Wav2Vec2WithCustomLoRA(nn.Module):
+    """Wav2Vec2 model with custom LoRA implementation that actually works."""
+    
+    def __init__(self, base_model, rank=8, alpha=16, target_modules=["q_proj", "v_proj"]):
+        super().__init__()
+        self.base_model = base_model
+        self.lora_layers = {}
+        
+        # Freeze base model parameters
+        for param in self.base_model.parameters():
+            param.requires_grad = False
+        
+        # Add LoRA layers to target modules
+        for name, module in self.base_model.named_modules():
+            if any(target in name for target in target_modules):
+                if isinstance(module, nn.Linear):
+                    # Create LoRA layer
+                    lora_layer = LoRALayer(
+                        module.in_features,
+                        module.out_features,
+                        rank=rank,
+                        alpha=alpha
+                    )
+                    self.lora_layers[name] = lora_layer
+                    # Register as a module so parameters are tracked
+                    setattr(self, f"lora_{name.replace('.', '_')}", lora_layer)
+        
+        # Unfreeze classifier and projector (task-specific layers)
+        for name, param in self.base_model.named_parameters():
+            if "classifier" in name or "projector" in name:
+                param.requires_grad = True
+        
+        print(f"Added LoRA to {len(self.lora_layers)} layers")
+        self.print_trainable_parameters()
+    
+    def forward(self, input_values, attention_mask=None, labels=None, **kwargs):
+        # Use hooks to add LoRA outputs
+        hooks = []
+        
+        def add_lora(module, input, output, lora_layer):
+            # Add LoRA adaptation to the output
+            if isinstance(output, tuple):
+                adapted = output[0] + lora_layer(input[0])
+                return (adapted,) + output[1:]
+            else:
+                return output + lora_layer(input[0])
+        
+        # Register forward hooks for LoRA layers
+        for name, module in self.base_model.named_modules():
+            if name in self.lora_layers:
+                hook = module.register_forward_hook(
+                    lambda m, i, o, layer=self.lora_layers[name]: add_lora(m, i, o, layer)
+                )
+                hooks.append(hook)
+        
+        # Forward through base model
+        outputs = self.base_model(
+            input_values=input_values,
+            attention_mask=attention_mask,
+            labels=labels,
+            **kwargs
+        )
+        
+        # Remove hooks
+        for hook in hooks:
+            hook.remove()
+        
+        return outputs
+    
+    def print_trainable_parameters(self):
+        trainable_params = 0
+        all_param = 0
+        for _, param in self.named_parameters():
+            all_param += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+        print(
+            f"trainable params: {trainable_params:,} || "
+            f"all params: {all_param:,} || "
+            f"trainable%: {100 * trainable_params / all_param:.2f}"
+        )
+    
+    def save_pretrained(self, save_directory):
+        """Save the model with LoRA weights."""
+        # Save base model
+        self.base_model.save_pretrained(save_directory)
+        # Save LoRA weights
+        lora_state_dict = {}
+        for name, param in self.named_parameters():
+            if "lora" in name:
+                lora_state_dict[name] = param
+        torch.save(lora_state_dict, f"{save_directory}/lora_weights.pt")
 
 
 def calculate_speaker_consistency(sample_ids, predictions):
@@ -189,15 +306,6 @@ def parse_args():
                        help="Maximum class weight to prevent instability")
     parser.add_argument("--unfreeze_last_n_layers", type=int, default=0,
                        help="Number of last transformer layers to unfreeze (0=freeze all, 3=unfreeze last 3)")
-    
-    # Early stopping arguments
-    parser.add_argument("--early_stopping_patience", type=int, default=5,
-                       help="Number of epochs without improvement before stopping")
-    parser.add_argument("--early_stopping_min_delta", type=float, default=0.001,
-                       help="Minimum change in validation metric to qualify as improvement")
-    parser.add_argument("--early_stopping_metric", type=str, default="accuracy",
-                       choices=["accuracy", "loss", "f1_macro"],
-                       help="Metric to monitor for early stopping")
     
     # Other arguments
     parser.add_argument("--output_dir", type=str, default="accent_classifier_output",
@@ -483,26 +591,19 @@ def setup_model(args, num_labels):
         print(f"  Unfrozen layers: {layers_to_unfreeze} (out of {num_layers} total layers)")
     
     if args.use_lora:
-        print("Applying LoRA for efficient fine-tuning...")
-        # Note: You'll need to install peft: pip install peft
-        try:
-            from peft import LoraConfig, get_peft_model, TaskType
-            
-            peft_config = LoraConfig(
-                # Use FEATURE_EXTRACTION to prevent PEFT from renaming `input_values` to `input_ids`,
-                # which causes a TypeError with Wav2Vec2.
-                task_type=TaskType.FEATURE_EXTRACTION,
-                r=args.lora_r,
-                lora_alpha=args.lora_r,  # Common to set alpha equal to r
-                lora_dropout=args.dropout_rate,
-                target_modules=["q_proj", "v_proj"],  # Wav2Vec2 attention layers
-            )
-            
-            model = get_peft_model(model, peft_config)
-            model.print_trainable_parameters()
-        except ImportError:
-            print("Warning: peft not installed. Install with: pip install peft")
-            print("Continuing without LoRA...")
+        print("\nApplying custom LoRA implementation (PEFT doesn't work with Wav2Vec2)...")
+        print(f"LoRA config: rank={args.lora_r}, alpha={args.lora_r*2}")
+        
+        # Use our custom LoRA implementation that actually works with Wav2Vec2
+        model = Wav2Vec2WithCustomLoRA(
+            base_model=model,
+            rank=args.lora_r,
+            alpha=args.lora_r * 2,  # Common to use alpha = 2 * rank
+            target_modules=["q_proj", "v_proj"]  # Attention query and value projections
+        )
+        
+        print("✓ Custom LoRA successfully applied!")
+        print("  This bypasses PEFT's limitations with audio models.")
     
     return model
 
@@ -511,11 +612,14 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_w
     """Train for one epoch"""
     model.train()
 
-    # Workaround for a known peft issue with Wav2Vec2 feature extractor
-    # when using LoRA. Forcing the feature extractor to eval mode avoids
-    # a tensor shape mismatch error.
-    if args.use_lora:
-        model.base_model.wav2vec2.feature_extractor.eval()
+    # Keep feature extractor in eval mode for stability
+    if hasattr(model, 'base_model'):
+        # Custom LoRA model
+        if hasattr(model.base_model, 'wav2vec2'):
+            model.base_model.wav2vec2.feature_extractor.eval()
+    elif hasattr(model, 'wav2vec2'):
+        # Regular model
+        model.wav2vec2.feature_extractor.eval()
 
     total_loss = 0
     total_grad_norm = 0
@@ -589,13 +693,15 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_w
     return total_loss / len(train_loader), loss_std, grad_norm_std
 
 
-def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
-    """Evaluate model with extended metrics"""
+def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8, eval_dataset=None):
+    """Evaluate model with extended metrics for senior MLE analysis"""
     model.eval()
     all_predictions = []
     all_labels = []
     all_logits = []
     all_sample_ids = []
+    all_datasets = []  # Track which dataset each sample comes from
+    all_durations = []  # Track audio duration if available
     total_loss = 0
     batch_losses = []
     
@@ -626,6 +732,17 @@ def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
             all_labels.extend(labels.cpu().numpy())
             all_logits.extend(logits.cpu().numpy())
             all_sample_ids.extend(sample_ids)
+            
+            # Extract dataset source and duration for each sample
+            if eval_dataset is not None:
+                batch_indices = list(range(len(sample_ids)))
+                for idx, sample_id in enumerate(sample_ids):
+                    # Find the sample in the dataset
+                    for sample in eval_dataset.samples:
+                        if sample.sample_id == sample_id:
+                            all_datasets.append(sample.dataset_name)
+                            all_durations.append(getattr(sample, 'duration', 7.5))
+                            break
     
     # Convert to numpy arrays
     all_predictions = np.array(all_predictions)
@@ -673,6 +790,52 @@ def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
     entropy = -np.sum(pred_probs * np.log(pred_probs + 1e-10), axis=1)
     avg_entropy = np.mean(entropy)
     
+    # Identify high-entropy (uncertain) predictions
+    high_entropy_threshold = np.percentile(entropy, 90)
+    high_entropy_samples = [(sid, ent, all_labels[i], all_predictions[i]) 
+                            for i, (sid, ent) in enumerate(zip(all_sample_ids, entropy)) 
+                            if ent > high_entropy_threshold]
+    
+    # Per-dataset performance if we have dataset info
+    per_dataset_accuracy = {}
+    per_dataset_f1 = {}
+    if all_datasets:
+        unique_datasets = list(set(all_datasets))
+        for ds in unique_datasets:
+            ds_mask = np.array([d == ds for d in all_datasets])
+            if np.sum(ds_mask) > 0:
+                ds_preds = np.array(all_predictions)[ds_mask]
+                ds_labels = np.array(all_labels)[ds_mask]
+                per_dataset_accuracy[ds] = accuracy_score(ds_labels, ds_preds)
+                per_dataset_f1[ds] = f1_score(ds_labels, ds_preds, average='macro')
+    
+    # Performance by duration buckets
+    duration_performance = {}
+    if all_durations:
+        duration_buckets = [(0, 5), (5, 10), (10, 15), (15, float('inf'))]
+        for min_dur, max_dur in duration_buckets:
+            bucket_mask = np.array([(min_dur <= d < max_dur) for d in all_durations])
+            if np.sum(bucket_mask) > 0:
+                bucket_preds = np.array(all_predictions)[bucket_mask]
+                bucket_labels = np.array(all_labels)[bucket_mask]
+                bucket_name = f"{min_dur}-{max_dur if max_dur != float('inf') else '∞'}s"
+                duration_performance[bucket_name] = {
+                    'accuracy': accuracy_score(bucket_labels, bucket_preds),
+                    'count': np.sum(bucket_mask)
+                }
+    
+    # Confusion analysis - which regions are most confused with each other
+    cm = confusion_matrix(all_labels, all_predictions)
+    # Normalize by true labels to get confusion rates
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    
+    # Find top confusion pairs (excluding diagonal)
+    confusion_pairs = []
+    for i in range(num_classes):
+        for j in range(num_classes):
+            if i != j and cm_normalized[i, j] > 0.1:  # More than 10% confusion
+                confusion_pairs.append((i, j, cm_normalized[i, j]))
+    
     return {
         'loss': avg_loss,
         'accuracy': accuracy,
@@ -682,10 +845,15 @@ def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
         'labels': all_labels,
         'per_class_f1': per_class_f1,
         'speaker_consistency': speaker_consistency,
-        'confusion_matrix': confusion_matrix(all_labels, all_predictions),
+        'confusion_matrix': cm,
         'macro_f1': macro_f1,
         'loss_std': loss_std,
-        'avg_entropy': avg_entropy
+        'avg_entropy': avg_entropy,
+        'per_dataset_accuracy': per_dataset_accuracy,
+        'per_dataset_f1': per_dataset_f1,
+        'duration_performance': duration_performance,
+        'high_entropy_samples': high_entropy_samples[:10],  # Top 10 most uncertain
+        'confusion_pairs': confusion_pairs
     }
 
 
@@ -913,19 +1081,29 @@ def main():
                 self.counter = 0
                 return True
     
-    # Initialize early stopping
+    # Initialize early stopping with sensible defaults
+    # Monitor val_loss with patience of 7 epochs and min_delta of 0.0005
     early_stopping = EarlyStopping(
-        patience=args.early_stopping_patience,
-        min_delta=args.early_stopping_min_delta,
-        metric=args.early_stopping_metric,
-        mode='max' if args.early_stopping_metric != 'loss' else 'min'
+        patience=7,
+        min_delta=0.0005,
+        metric='loss',
+        mode='min'
     )
     
     # Training loop
     print(f"\nStarting training for {args.epochs} epochs...")
-    print(f"Early stopping: monitoring {args.early_stopping_metric} with patience={args.early_stopping_patience}")
+    print(f"Early stopping: monitoring validation loss with patience=7")
     best_val_accuracy = 0
-    best_val_score = float('-inf') if args.early_stopping_metric != 'loss' else float('inf')
+    best_val_loss = float('inf')
+    
+    # Track learning curves for data efficiency analysis
+    learning_curve = {
+        'train_losses': [],
+        'val_losses': [],
+        'val_accuracies': [],
+        'val_f1_scores': [],
+        'epochs': []
+    }
     
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
@@ -939,8 +1117,8 @@ def main():
         print(f"Average training loss: {train_loss:.4f} (std: {train_loss_std:.4f})")
         print(f"Epoch time: {epoch_time:.1f}s ({epoch_time/len(train_loader):.2f}s per batch)")
         
-        # Evaluate
-        val_results = evaluate(model, val_loader, device, "validation", num_labels)
+        # Evaluate with dataset tracking
+        val_results = evaluate(model, val_loader, device, "validation", num_labels, val_dataset)
         print(f"Validation loss: {val_results['loss']:.4f}")
         print(f"Validation accuracy: {val_results['accuracy']:.4f}")
         print(f"Validation macro F1: {val_results['macro_f1']:.4f}")
@@ -948,6 +1126,20 @@ def main():
         print(f"Validation top-3 accuracy: {val_results['top3_accuracy']:.4f}")
         print(f"Speaker consistency: {val_results['speaker_consistency']:.4f}")
         print(f"Avg prediction entropy: {val_results['avg_entropy']:.4f}")
+        
+        # Print per-dataset performance if available
+        if val_results['per_dataset_accuracy']:
+            print("\nPer-dataset accuracy:")
+            for ds, acc in sorted(val_results['per_dataset_accuracy'].items()):
+                f1 = val_results['per_dataset_f1'].get(ds, 0)
+                print(f"  {ds}: acc={acc:.3f}, f1={f1:.3f}")
+        
+        # Update learning curves
+        learning_curve['train_losses'].append(train_loss)
+        learning_curve['val_losses'].append(val_results['loss'])
+        learning_curve['val_accuracies'].append(val_results['accuracy'])
+        learning_curve['val_f1_scores'].append(val_results['macro_f1'])
+        learning_curve['epochs'].append(epoch)
         
         # Log to wandb
         log_dict = {
@@ -965,8 +1157,34 @@ def main():
             'val/top3_accuracy': val_results['top3_accuracy'],
             'val/speaker_consistency': val_results['speaker_consistency'],
             'val/avg_entropy': val_results['avg_entropy'],
-            'early_stopping/counter': early_stopping.counter
+            'early_stopping/counter': early_stopping.counter,
+            'learning/improvement_rate': (val_results['accuracy'] - learning_curve['val_accuracies'][0]) / (epoch + 1) if epoch > 0 and learning_curve['val_accuracies'] else 0
         }
+        
+        # Add per-dataset metrics to W&B
+        for ds, acc in val_results['per_dataset_accuracy'].items():
+            log_dict[f'val/dataset_{ds}_accuracy'] = acc
+            log_dict[f'val/dataset_{ds}_f1'] = val_results['per_dataset_f1'].get(ds, 0)
+        
+        # Add duration bucket performance
+        for bucket, perf in val_results['duration_performance'].items():
+            log_dict[f'val/duration_{bucket}_accuracy'] = perf['accuracy']
+            log_dict[f'val/duration_{bucket}_count'] = perf['count']
+        
+        # Log top confusion pairs
+        confusion_table_data = []
+        for true_class, pred_class, rate in val_results['confusion_pairs'][:5]:
+            confusion_table_data.append([
+                label_names[true_class] if true_class < len(label_names) else f"class_{true_class}",
+                label_names[pred_class] if pred_class < len(label_names) else f"class_{pred_class}",
+                f"{rate:.2%}"
+            ])
+        
+        if confusion_table_data:
+            log_dict['val/top_confusions'] = wandb.Table(
+                columns=["True Region", "Predicted Region", "Confusion Rate"],
+                data=confusion_table_data
+            )
         
         # Add per-region F1 scores
         for class_idx, f1_score in val_results['per_class_f1'].items():
@@ -985,57 +1203,57 @@ def main():
             )
         })
         
-        # Get current metric for early stopping
-        if args.early_stopping_metric == 'accuracy':
-            current_metric = val_results['accuracy']
-        elif args.early_stopping_metric == 'loss':
-            current_metric = val_results['loss']
-        elif args.early_stopping_metric == 'f1_macro':
-            current_metric = val_results['macro_f1']
+        # Early stopping based on validation loss
+        current_loss = val_results['loss']
+        improved = early_stopping(current_loss)
         
-        # Check if model improved
-        improved = early_stopping(current_metric)
-        
-        # Save best model based on early stopping metric
-        should_save = False
-        if args.early_stopping_metric == 'accuracy' and current_metric > best_val_score:
-            best_val_score = current_metric
-            should_save = True
-        elif args.early_stopping_metric == 'loss' and current_metric < best_val_score:
-            best_val_score = current_metric
-            should_save = True
-        elif args.early_stopping_metric == 'f1_macro' and current_metric > best_val_score:
-            best_val_score = current_metric
-            should_save = True
-            
-        # Also track best accuracy for backwards compatibility
-        if val_results['accuracy'] > best_val_accuracy:
-            best_val_accuracy = val_results['accuracy']
-            if args.early_stopping_metric == 'accuracy':
-                should_save = True
-        
-        if should_save:
+        # Save best model based on validation loss
+        if current_loss < best_val_loss:
+            best_val_loss = current_loss
             save_path = os.path.join(args.output_dir, 'best_model')
             model.save_pretrained(save_path)
             processor.save_pretrained(save_path)
-            print(f"Saved best model - {args.early_stopping_metric}: {current_metric:.4f}")
+            print(f"Saved best model - val_loss: {current_loss:.4f}")
+        
+        # Track best accuracy for reference
+        if val_results['accuracy'] > best_val_accuracy:
+            best_val_accuracy = val_results['accuracy']
         
         # Check early stopping
         if early_stopping.early_stop:
             print(f"\nEarly stopping triggered after {epoch + 1} epochs")
-            print(f"Best {args.early_stopping_metric}: {best_val_score:.4f}")
+            print(f"Best val_loss: {best_val_loss:.4f}, Best val_accuracy: {best_val_accuracy:.4f}")
             break
         elif not improved:
-            print(f"No improvement in {args.early_stopping_metric} for {early_stopping.counter} epochs")
+            print(f"No improvement in val_loss for {early_stopping.counter} epochs")
     
-    # Final evaluation on test set
-    print("\nEvaluating on test set...")
-    test_results = evaluate(model, test_loader, device, "test", num_labels)
+    # Final evaluation on test set with detailed analysis
+    print("\nEvaluating on test set with detailed analysis...")
+    test_results = evaluate(model, test_loader, device, "test", num_labels, test_dataset)
     print(f"Test loss: {test_results['loss']:.4f}")
     print(f"Test accuracy: {test_results['accuracy']:.4f}")
     print(f"Test top-2 accuracy: {test_results['top2_accuracy']:.4f}")
     print(f"Test top-3 accuracy: {test_results['top3_accuracy']:.4f}")
     print(f"Speaker consistency: {test_results['speaker_consistency']:.4f}")
+    
+    # Print detailed test analysis
+    if test_results['per_dataset_accuracy']:
+        print("\nTest Per-Dataset Performance:")
+        for ds, acc in sorted(test_results['per_dataset_accuracy'].items()):
+            f1 = test_results['per_dataset_f1'].get(ds, 0)
+            print(f"  {ds}: accuracy={acc:.3f}, f1={f1:.3f}")
+    
+    if test_results['duration_performance']:
+        print("\nTest Performance by Duration:")
+        for bucket, perf in sorted(test_results['duration_performance'].items()):
+            print(f"  {bucket}: accuracy={perf['accuracy']:.3f} (n={perf['count']})") 
+    
+    if test_results['confusion_pairs']:
+        print("\nTop Region Confusions (>10% error rate):")
+        for true_idx, pred_idx, rate in test_results['confusion_pairs'][:5]:
+            true_name = label_names[true_idx] if true_idx < len(label_names) else f"class_{true_idx}"
+            pred_name = label_names[pred_idx] if pred_idx < len(label_names) else f"class_{pred_idx}"
+            print(f"  {true_name} → {pred_name}: {rate:.1%}")
     
     # Generate and save classification report
     print("\nClassification Report:")
@@ -1071,7 +1289,13 @@ def main():
         'test_speaker_consistency': test_results['speaker_consistency'],
         'test_loss': test_results['loss'],
         'test_per_class_f1': test_results['per_class_f1'],
-        'classification_report': report
+        'test_per_dataset_accuracy': test_results['per_dataset_accuracy'],
+        'test_per_dataset_f1': test_results['per_dataset_f1'],
+        'test_duration_performance': test_results['duration_performance'],
+        'test_confusion_pairs': [(label_names[i], label_names[j], float(r)) 
+                                 for i, j, r in test_results['confusion_pairs'][:10]],
+        'classification_report': report,
+        'learning_curve': learning_curve
     }
     
     with open(os.path.join(args.output_dir, 'results.json'), 'w') as f:
@@ -1087,9 +1311,28 @@ def main():
     }
     
     # Add per-region F1 scores for test set
-    for class_idx, f1_score in test_results['per_class_f1'].items():
+    for class_idx, f1_score_val in test_results['per_class_f1'].items():
         region_name = label_names[class_idx] if class_idx < len(label_names) else f"class_{class_idx}"
-        test_log_dict[f'test/f1_{region_name}'] = f1_score
+        test_log_dict[f'test/f1_{region_name}'] = f1_score_val
+    
+    # Add per-dataset test metrics
+    for ds, acc in test_results['per_dataset_accuracy'].items():
+        test_log_dict[f'test/dataset_{ds}_accuracy'] = acc
+        test_log_dict[f'test/dataset_{ds}_f1'] = test_results['per_dataset_f1'].get(ds, 0)
+    
+    # Create a summary table for W&B
+    summary_table = wandb.Table(
+        columns=["Metric", "Value"],
+        data=[
+            ["Best Val Accuracy", f"{best_val_accuracy:.3f}"],
+            ["Test Accuracy", f"{test_results['accuracy']:.3f}"],
+            ["Test Macro F1", f"{test_results['macro_f1']:.3f}"],
+            ["Speaker Consistency", f"{test_results['speaker_consistency']:.3f}"],
+            ["Epochs Trained", str(epoch + 1)],
+            ["Early Stopped", "Yes" if early_stopping.early_stop else "No"]
+        ]
+    )
+    test_log_dict['test/summary_table'] = summary_table
     
     # Log test confusion matrix
     wandb.log({
