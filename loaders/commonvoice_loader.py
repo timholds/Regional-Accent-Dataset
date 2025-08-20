@@ -67,7 +67,8 @@ class CommonVoiceLoader(BaseDatasetLoader):
                       'memphis', 'nashville', 'knoxville', 'louisville', 'lexington',
                       'little rock', 'mobile', 'shreveport'],
             'regions': ['deep south', 'southern united states', 'gulf coast', 'dixie',
-                       'bible belt', 'southern', 'the south', 'gulf states', 'bayou'],
+                       'bible belt', 'southern', 'the south', 'gulf states', 'bayou',
+                       'cajun', 'creole', 'appalachian', 'appalachia', 'ozark', 'bluegrass'],
             'abbreviations': [' al ', ' ms ', ' la ', ' tn ', ' ky ', ' ar ']
         },
         'Midwest': {
@@ -118,6 +119,14 @@ class CommonVoiceLoader(BaseDatasetLoader):
         # Non-English as primary language (clear indicators)
         'india and south asia', 'filipino english', 'caribbean english',
         'african english', 'asian english', 'european english',
+        'malaysian english', 'singaporean english', 'hong kong english',
+        # Specific foreign languages/nationalities (only when clearly foreign)
+        'finnish', 'swedish', 'norwegian', 'danish', 'icelandic',
+        'german english', 'french english', 'russian english', 
+        'polish english', 'czech english', 'hungarian english',
+        'turkish english', 'arabic english', 'hebrew english',
+        'chinese english', 'japanese english', 'korean english',
+        'vietnamese english', 'thai english', 'hindi english',
         # Clear non-native indicators
         'non-native', 'non native', 'second language', 'esl', 'foreign accent',
         'learning english', 'english learner',
@@ -189,7 +198,8 @@ class CommonVoiceLoader(BaseDatasetLoader):
                     
                 # Check states (highest confidence)
                 for state in geographic_data['states']:
-                    if state in part:
+                    # Use word boundaries for better matching (avoid "finnish" matching "fin" in regions)
+                    if state in part and not any(foreign in part for foreign in ['finnish', 'spanish', 'polish', 'danish']):
                         score += 3  # States get highest weight
                         matches.append(f"state:{state}")
                 

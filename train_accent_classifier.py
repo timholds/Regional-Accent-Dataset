@@ -22,7 +22,7 @@ from transformers import (
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 import wandb
 import json
 import signal
@@ -187,6 +187,17 @@ def parse_args():
                        help="Power for class weight calculation (0=no weighting, 0.5=sqrt, 1=linear)")
     parser.add_argument("--class_weight_max", type=float, default=3.0,
                        help="Maximum class weight to prevent instability")
+    parser.add_argument("--unfreeze_last_n_layers", type=int, default=0,
+                       help="Number of last transformer layers to unfreeze (0=freeze all, 3=unfreeze last 3)")
+    
+    # Early stopping arguments
+    parser.add_argument("--early_stopping_patience", type=int, default=5,
+                       help="Number of epochs without improvement before stopping")
+    parser.add_argument("--early_stopping_min_delta", type=float, default=0.001,
+                       help="Minimum change in validation metric to qualify as improvement")
+    parser.add_argument("--early_stopping_metric", type=str, default="accuracy",
+                       choices=["accuracy", "loss", "f1_macro"],
+                       help="Metric to monitor for early stopping")
     
     # Other arguments
     parser.add_argument("--output_dir", type=str, default="accent_classifier_output",
@@ -404,6 +415,10 @@ def print_model_summary(model, args=None):
         print(f"  Rank (r): {args.lora_r}")
         print(f"  Dropout: {args.dropout_rate}")
     
+    if args and hasattr(args, 'unfreeze_last_n_layers') and args.unfreeze_last_n_layers > 0:
+        print(f"\nUnfrozen encoder layers:")
+        print(f"  Last {args.unfreeze_last_n_layers} transformer layers are trainable")
+    
     print("="*60 + "\n")
 
 
@@ -442,13 +457,30 @@ def setup_model(args, num_labels):
     # Replace classifier with our new architecture
     model.classifier = new_classifier
     
-    # Freeze the entire feature extractor and encoder
+    # Freeze the entire feature extractor and encoder initially
     model.freeze_feature_encoder()
     
-    # Freeze ALL transformer layers - we only want to train the classifier and projector
+    # Freeze ALL transformer layers initially
     for name, param in model.named_parameters():
         if "classifier" not in name and "projector" not in name:
             param.requires_grad = False
+    
+    # Optionally unfreeze the last N transformer layers
+    if args.unfreeze_last_n_layers > 0:
+        print(f"Unfreezing last {args.unfreeze_last_n_layers} transformer layers...")
+        
+        # Get the number of transformer layers
+        num_layers = model.config.num_hidden_layers  # Should be 12 for wav2vec2-base
+        
+        # Determine which layers to unfreeze
+        layers_to_unfreeze = list(range(num_layers - args.unfreeze_last_n_layers, num_layers))
+        
+        # Unfreeze the specified layers
+        for layer_idx in layers_to_unfreeze:
+            for name, param in model.wav2vec2.encoder.layers[layer_idx].named_parameters():
+                param.requires_grad = True
+        
+        print(f"  Unfrozen layers: {layers_to_unfreeze} (out of {num_layers} total layers)")
     
     if args.use_lora:
         print("Applying LoRA for efficient fine-tuning...")
@@ -475,7 +507,7 @@ def setup_model(args, num_labels):
     return model
 
 
-def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_weights=None):
+def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_weights=None, epoch=0):
     """Train for one epoch"""
     model.train()
 
@@ -488,6 +520,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_w
     total_loss = 0
     total_grad_norm = 0
     grad_norm_steps = 0
+    batch_losses = []
+    batch_grad_norms = []
     progress_bar = tqdm(train_loader, desc="Training")
     
     for step, batch in enumerate(progress_bar):
@@ -513,6 +547,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_w
             
         loss = loss / args.gradient_accumulation_steps
         total_loss += loss.item() * args.gradient_accumulation_steps
+        batch_losses.append(loss.item() * args.gradient_accumulation_steps)
         
         # Backward pass
         loss.backward()
@@ -523,6 +558,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_w
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             total_grad_norm += grad_norm.item()
             grad_norm_steps += 1
+            batch_grad_norms.append(grad_norm.item())
             
             optimizer.step()
             scheduler.step()
@@ -542,10 +578,15 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, args, class_w
                 'train/loss': loss.item() * args.gradient_accumulation_steps,
                 'train/learning_rate': scheduler.get_last_lr()[0],
                 'train/grad_norm': avg_grad_norm,
-                'train/step': step
+                'train/step': step,
+                'train/global_step': epoch * len(train_loader) + step
             })
     
-    return total_loss / len(train_loader)
+    # Calculate statistics for better monitoring
+    loss_std = np.std(batch_losses) if batch_losses else 0
+    grad_norm_std = np.std(batch_grad_norms) if batch_grad_norms else 0
+    
+    return total_loss / len(train_loader), loss_std, grad_norm_std
 
 
 def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
@@ -556,6 +597,7 @@ def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
     all_logits = []
     all_sample_ids = []
     total_loss = 0
+    batch_losses = []
     
     with torch.no_grad():
         for batch in tqdm(eval_loader, desc=f"Evaluating {dataset_name}"):
@@ -576,6 +618,7 @@ def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits, labels)
             total_loss += loss.item()
+            batch_losses.append(loss.item())
             
             predictions = logits.argmax(dim=-1)
             
@@ -618,6 +661,18 @@ def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
     # Calculate speaker consistency metric
     speaker_consistency = calculate_speaker_consistency(all_sample_ids, all_predictions)
     
+    # Calculate macro F1 score
+    from sklearn.metrics import f1_score
+    macro_f1 = f1_score(all_labels, all_predictions, average='macro')
+    
+    # Calculate loss std for monitoring stability
+    loss_std = np.std(batch_losses) if batch_losses else 0
+    
+    # Calculate prediction entropy (uncertainty measure)
+    pred_probs = np.exp(all_logits) / np.sum(np.exp(all_logits), axis=1, keepdims=True)
+    entropy = -np.sum(pred_probs * np.log(pred_probs + 1e-10), axis=1)
+    avg_entropy = np.mean(entropy)
+    
     return {
         'loss': avg_loss,
         'accuracy': accuracy,
@@ -627,7 +682,10 @@ def evaluate(model, eval_loader, device, dataset_name="val", num_classes=8):
         'labels': all_labels,
         'per_class_f1': per_class_f1,
         'speaker_consistency': speaker_consistency,
-        'confusion_matrix': confusion_matrix(all_labels, all_predictions)
+        'confusion_matrix': confusion_matrix(all_labels, all_predictions),
+        'macro_f1': macro_f1,
+        'loss_std': loss_std,
+        'avg_entropy': avg_entropy
     }
 
 
@@ -825,39 +883,89 @@ def main():
     )
     print(f"\nScheduler setup: total_steps={total_steps}, warmup_steps={warmup_steps}")
     
+    # Early stopping setup
+    class EarlyStopping:
+        def __init__(self, patience=5, min_delta=0.001, metric='accuracy', mode='max'):
+            self.patience = patience
+            self.min_delta = min_delta
+            self.metric = metric
+            self.mode = mode
+            self.counter = 0
+            self.best_score = None
+            self.early_stop = False
+            
+        def __call__(self, current_score):
+            if self.mode == 'max':
+                score = current_score
+            else:
+                score = -current_score
+                
+            if self.best_score is None:
+                self.best_score = score
+                return False
+            elif score < self.best_score + self.min_delta:
+                self.counter += 1
+                if self.counter >= self.patience:
+                    self.early_stop = True
+                return False
+            else:
+                self.best_score = score
+                self.counter = 0
+                return True
+    
+    # Initialize early stopping
+    early_stopping = EarlyStopping(
+        patience=args.early_stopping_patience,
+        min_delta=args.early_stopping_min_delta,
+        metric=args.early_stopping_metric,
+        mode='max' if args.early_stopping_metric != 'loss' else 'min'
+    )
+    
     # Training loop
     print(f"\nStarting training for {args.epochs} epochs...")
+    print(f"Early stopping: monitoring {args.early_stopping_metric} with patience={args.early_stopping_patience}")
     best_val_accuracy = 0
+    best_val_score = float('-inf') if args.early_stopping_metric != 'loss' else float('inf')
     
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
         
         # Train
         epoch_start = time.time()
-        train_loss = train_epoch(model, train_loader, optimizer, scheduler, device, args, class_weights)
+        train_loss, train_loss_std, train_grad_std = train_epoch(
+            model, train_loader, optimizer, scheduler, device, args, class_weights, epoch
+        )
         epoch_time = time.time() - epoch_start
-        print(f"Average training loss: {train_loss:.4f}")
+        print(f"Average training loss: {train_loss:.4f} (std: {train_loss_std:.4f})")
         print(f"Epoch time: {epoch_time:.1f}s ({epoch_time/len(train_loader):.2f}s per batch)")
         
         # Evaluate
         val_results = evaluate(model, val_loader, device, "validation", num_labels)
         print(f"Validation loss: {val_results['loss']:.4f}")
         print(f"Validation accuracy: {val_results['accuracy']:.4f}")
+        print(f"Validation macro F1: {val_results['macro_f1']:.4f}")
         print(f"Validation top-2 accuracy: {val_results['top2_accuracy']:.4f}")
         print(f"Validation top-3 accuracy: {val_results['top3_accuracy']:.4f}")
         print(f"Speaker consistency: {val_results['speaker_consistency']:.4f}")
+        print(f"Avg prediction entropy: {val_results['avg_entropy']:.4f}")
         
         # Log to wandb
         log_dict = {
             'epoch': epoch,
             'train/epoch_loss': train_loss,
+            'train/epoch_loss_std': train_loss_std,
+            'train/grad_norm_std': train_grad_std,
             'train/epoch_time': epoch_time,
             'train/batch_time': epoch_time/len(train_loader),
             'val/loss': val_results['loss'],
+            'val/loss_std': val_results['loss_std'],
             'val/accuracy': val_results['accuracy'],
+            'val/macro_f1': val_results['macro_f1'],
             'val/top2_accuracy': val_results['top2_accuracy'],
             'val/top3_accuracy': val_results['top3_accuracy'],
-            'val/speaker_consistency': val_results['speaker_consistency']
+            'val/speaker_consistency': val_results['speaker_consistency'],
+            'val/avg_entropy': val_results['avg_entropy'],
+            'early_stopping/counter': early_stopping.counter
         }
         
         # Add per-region F1 scores
@@ -877,13 +985,48 @@ def main():
             )
         })
         
-        # Save best model
+        # Get current metric for early stopping
+        if args.early_stopping_metric == 'accuracy':
+            current_metric = val_results['accuracy']
+        elif args.early_stopping_metric == 'loss':
+            current_metric = val_results['loss']
+        elif args.early_stopping_metric == 'f1_macro':
+            current_metric = val_results['macro_f1']
+        
+        # Check if model improved
+        improved = early_stopping(current_metric)
+        
+        # Save best model based on early stopping metric
+        should_save = False
+        if args.early_stopping_metric == 'accuracy' and current_metric > best_val_score:
+            best_val_score = current_metric
+            should_save = True
+        elif args.early_stopping_metric == 'loss' and current_metric < best_val_score:
+            best_val_score = current_metric
+            should_save = True
+        elif args.early_stopping_metric == 'f1_macro' and current_metric > best_val_score:
+            best_val_score = current_metric
+            should_save = True
+            
+        # Also track best accuracy for backwards compatibility
         if val_results['accuracy'] > best_val_accuracy:
             best_val_accuracy = val_results['accuracy']
+            if args.early_stopping_metric == 'accuracy':
+                should_save = True
+        
+        if should_save:
             save_path = os.path.join(args.output_dir, 'best_model')
             model.save_pretrained(save_path)
             processor.save_pretrained(save_path)
-            print(f"Saved best model with accuracy: {best_val_accuracy:.4f}")
+            print(f"Saved best model - {args.early_stopping_metric}: {current_metric:.4f}")
+        
+        # Check early stopping
+        if early_stopping.early_stop:
+            print(f"\nEarly stopping triggered after {epoch + 1} epochs")
+            print(f"Best {args.early_stopping_metric}: {best_val_score:.4f}")
+            break
+        elif not improved:
+            print(f"No improvement in {args.early_stopping_metric} for {early_stopping.counter} epochs")
     
     # Final evaluation on test set
     print("\nEvaluating on test set...")
