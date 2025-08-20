@@ -117,9 +117,8 @@ class Wav2Vec2WithCustomLoRA(nn.Module):
         self.base_model = base_model
         self.lora_layers = {}
         
-        # Freeze base model parameters
-        for param in self.base_model.parameters():
-            param.requires_grad = False
+        # Note: We DON'T freeze parameters here - that's already handled in setup_model
+        # This allows the unfreezing logic to work independently of LoRA
         
         # Add LoRA layers to target modules
         for name, module in self.base_model.named_modules():
@@ -135,11 +134,6 @@ class Wav2Vec2WithCustomLoRA(nn.Module):
                     self.lora_layers[name] = lora_layer
                     # Register as a module so parameters are tracked
                     setattr(self, f"lora_{name.replace('.', '_')}", lora_layer)
-        
-        # Unfreeze classifier and projector (task-specific layers)
-        for name, param in self.base_model.named_parameters():
-            if "classifier" in name or "projector" in name:
-                param.requires_grad = True
         
         print(f"Added LoRA to {len(self.lora_layers)} layers")
         self.print_trainable_parameters()
@@ -573,7 +567,7 @@ def setup_model(args, num_labels):
         if "classifier" not in name and "projector" not in name:
             param.requires_grad = False
     
-    # Optionally unfreeze the last N transformer layers
+    # Optionally unfreeze the last N transformer layers (works with or without LoRA)
     if args.unfreeze_last_n_layers > 0:
         print(f"Unfreezing last {args.unfreeze_last_n_layers} transformer layers...")
         
@@ -603,6 +597,9 @@ def setup_model(args, num_labels):
         )
         
         print("✓ Custom LoRA successfully applied!")
+        if args.unfreeze_last_n_layers > 0:
+            print(f"  Using hybrid approach: LoRA + unfrozen last {args.unfreeze_last_n_layers} layers")
+            print(f"  This combines low-rank adaptations with full fine-tuning of upper layers")
         print("  This bypasses PEFT's limitations with audio models.")
     
     return model

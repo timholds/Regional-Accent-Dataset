@@ -7,8 +7,21 @@ Fine-tuning Wav2Vec2 to classify US regional accents using multiple datasets.
 ```bash
 # Prepare unified dataset from all three sources (TIMIT, CommonVoice, CORAAL)
 python prepare_dataset.py --datasets TIMIT CommonVoice CORAAL --output_dir prepared_dataset
-# Train the model
-python train_accent_classifier.py --dataset_path prepared_dataset/accent_dataset
+
+# Train with optimized settings for 29+ hours of data
+python train_accent_classifier.py \
+    --dataset_path ./prepared_dataset/accent_dataset \
+    --learning_rate 3e-4 \
+    --gradient_accumulation_steps 4 \
+    --batch_size 8 \
+    --epochs 50 \
+    --dropout_rate 0.25 \
+    --weight_decay 0.01 \
+    --class_weight_power 0.7 \
+    --unfreeze_last_n_layers 4 \
+    --hidden_dim 768 \
+    --warmup_ratio 0.15 \
+    --desc "Optimized: LR 3e-4, unfreeze 4 layers, hidden=768"
 ```
 
 ## Overview
