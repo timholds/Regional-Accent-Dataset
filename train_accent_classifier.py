@@ -284,7 +284,7 @@ def parse_args():
                        help="Ratio of total training steps for warmup (default: 0.1)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
                        help="Gradient accumulation steps")
-    parser.add_argument("--max_grad_norm", type=float, default=0.5,
+    parser.add_argument("--max_grad_norm", type=float, default=1.0, #increase to 5 for LoRA
                        help="Max gradient norm for clipping")
     parser.add_argument("--weight_decay", type=float, default=0.01,
                        help="Weight decay for AdamW optimizer")
@@ -300,6 +300,10 @@ def parse_args():
                        help="Maximum class weight to prevent instability")
     parser.add_argument("--unfreeze_last_n_layers", type=int, default=0,
                        help="Number of last transformer layers to unfreeze (0=freeze all, 3=unfreeze last 3)")
+    
+    # Early stopping arguments
+    parser.add_argument("--no_early_stopping", action="store_true",
+                       help="Disable early stopping")
     
     # Other arguments
     parser.add_argument("--output_dir", type=str, default="accent_classifier_output",
@@ -1050,7 +1054,7 @@ def main():
     
     # Early stopping setup
     class EarlyStopping:
-        def __init__(self, patience=5, min_delta=0.001, metric='accuracy', mode='max'):
+        def __init__(self, patience=5, min_delta=0.001, metric='accuracy', mode='max', enabled=True):
             self.patience = patience
             self.min_delta = min_delta
             self.metric = metric
@@ -1058,8 +1062,13 @@ def main():
             self.counter = 0
             self.best_score = None
             self.early_stop = False
+            self.enabled = enabled
             
         def __call__(self, current_score):
+            # If disabled, always return False (no improvement) and never trigger early stop
+            if not self.enabled:
+                return False
+                
             if self.mode == 'max':
                 score = current_score
             else:
@@ -1078,18 +1087,22 @@ def main():
                 self.counter = 0
                 return True
     
-    # Initialize early stopping with sensible defaults
-    # Monitor val_loss with patience of 7 epochs and min_delta of 0.0005
+    # Always create early stopping instance, but disable if requested
     early_stopping = EarlyStopping(
-        patience=7,
-        min_delta=0.0005,
+        patience=10,
+        min_delta=0.001,  # Increased from 0.0005 for more meaningful threshold
         metric='loss',
-        mode='min'
+        mode='min',
+        enabled=not args.no_early_stopping
     )
+    
+    if args.no_early_stopping:
+        print("Early stopping is disabled")
+    else:
+        print(f"Early stopping: monitoring validation loss with patience=10, min_delta=0.001")
     
     # Training loop
     print(f"\nStarting training for {args.epochs} epochs...")
-    print(f"Early stopping: monitoring validation loss with patience=7")
     best_val_accuracy = 0
     best_val_loss = float('inf')
     
@@ -1154,9 +1167,12 @@ def main():
             'val/top3_accuracy': val_results['top3_accuracy'],
             'val/speaker_consistency': val_results['speaker_consistency'],
             'val/avg_entropy': val_results['avg_entropy'],
-            'early_stopping/counter': early_stopping.counter,
             'learning/improvement_rate': (val_results['accuracy'] - learning_curve['val_accuracies'][0]) / (epoch + 1) if epoch > 0 and learning_curve['val_accuracies'] else 0
         }
+        
+        # Add early stopping counter if enabled
+        if early_stopping.enabled:
+            log_dict['early_stopping/counter'] = early_stopping.counter
         
         # Add per-dataset metrics to W&B
         for ds, acc in val_results['per_dataset_accuracy'].items():
@@ -1221,7 +1237,7 @@ def main():
             print(f"\nEarly stopping triggered after {epoch + 1} epochs")
             print(f"Best val_loss: {best_val_loss:.4f}, Best val_accuracy: {best_val_accuracy:.4f}")
             break
-        elif not improved:
+        elif early_stopping.enabled and not improved:
             print(f"No improvement in val_loss for {early_stopping.counter} epochs")
     
     # Final evaluation on test set with detailed analysis
