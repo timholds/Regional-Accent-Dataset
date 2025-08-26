@@ -13,12 +13,14 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from transformers import (
     Wav2Vec2ForSequenceClassification,
     Wav2Vec2Processor,
     get_linear_schedule_with_warmup
 )
+from collections import defaultdict
+from typing import Iterator
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -85,6 +87,89 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 atexit.register(cleanup_gpu)
+
+
+class SpeakerBalancedSampler(Sampler):
+    """
+    Ensures maximum speaker diversity within each batch.
+    Prevents model from memorizing speaker voices instead of learning accents.
+    """
+    
+    def __init__(self, dataset, batch_size, max_samples_per_speaker=2):
+        """
+        Args:
+            dataset: Dataset with samples having speaker_id attribute
+            batch_size: Size of each batch
+            max_samples_per_speaker: Maximum samples from same speaker per batch (default: 2)
+        """
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.max_per_speaker = max_samples_per_speaker
+        
+        # Group sample indices by speaker
+        self.speaker_to_indices = defaultdict(list)
+        for idx, sample in enumerate(dataset.samples):
+            speaker_key = f"{sample.dataset_name}_{sample.speaker_id}"
+            self.speaker_to_indices[speaker_key].append(idx)
+        
+        self.speakers = list(self.speaker_to_indices.keys())
+        self.num_samples = len(dataset.samples)
+        
+        print(f"SpeakerBalancedSampler initialized:")
+        print(f"  - Total speakers: {len(self.speakers)}")
+        print(f"  - Total samples: {self.num_samples}")
+        print(f"  - Batch size: {batch_size}")
+        print(f"  - Max samples per speaker per batch: {max_samples_per_speaker}")
+        
+    def __iter__(self) -> Iterator[int]:
+        """Yield indices ensuring speaker diversity within batches."""
+        
+        # Create pools of available samples for each speaker
+        speaker_pools = {
+            speaker: list(np.random.permutation(indices))
+            for speaker, indices in self.speaker_to_indices.items()
+        }
+        
+        indices_yielded = 0
+        
+        while indices_yielded < self.num_samples:
+            batch_indices = []
+            speakers_in_batch = []
+            
+            # Shuffle speakers for this batch
+            available_speakers = [s for s in self.speakers if speaker_pools[s]]
+            np.random.shuffle(available_speakers)
+            
+            # Build batch with maximum speaker diversity
+            speaker_idx = 0
+            while len(batch_indices) < self.batch_size and indices_yielded < self.num_samples:
+                if not available_speakers:
+                    break
+                    
+                # Round-robin through speakers
+                speaker = available_speakers[speaker_idx % len(available_speakers)]
+                
+                # Take up to max_per_speaker samples from this speaker
+                samples_from_speaker = speakers_in_batch.count(speaker)
+                if samples_from_speaker < self.max_per_speaker and speaker_pools[speaker]:
+                    batch_indices.append(speaker_pools[speaker].pop())
+                    speakers_in_batch.append(speaker)
+                    indices_yielded += 1
+                    
+                    # Remove speaker if no more samples
+                    if not speaker_pools[speaker]:
+                        available_speakers.remove(speaker)
+                
+                speaker_idx += 1
+            
+            # Shuffle within batch to avoid patterns
+            np.random.shuffle(batch_indices)
+            
+            for idx in batch_indices:
+                yield idx
+    
+    def __len__(self) -> int:
+        return self.num_samples
 
 
 # Custom LoRA implementation for Wav2Vec2 (bypasses PEFT limitations)
@@ -326,6 +411,10 @@ def parse_args():
                        help="Disable torch.compile (enabled by default on PyTorch 2.0+)")
     parser.add_argument("--num_workers", type=int, default=None,
                        help="Number of dataloader workers (default: auto-detect)")
+    
+    # Sampling strategy
+    parser.add_argument("--balance_speaker_sampling", action="store_true",
+                       help="Use speaker-balanced sampling to prevent memorization")
     
     return parser.parse_args()
 
@@ -935,37 +1024,55 @@ def main():
         num_workers = min(args.num_workers, 4)  # Cap at 4 even if user specifies more
     
     # Create data loaders with safer settings to prevent GPU/display issues
+    # Set up sampling strategy
+    if args.balance_speaker_sampling:
+        print("\n✓ Using SpeakerBalancedSampler to prevent speaker memorization")
+        train_sampler = SpeakerBalancedSampler(
+            train_dataset, 
+            batch_size=args.batch_size,
+            max_samples_per_speaker=2  # Hardcoded as requested
+        )
+        train_shuffle = False
+    else:
+        print("\n⚠ Using standard random sampling (may lead to speaker memorization)")
+        train_sampler = None
+        train_shuffle = True
+    
+    # Common DataLoader kwargs
+    loader_kwargs = {
+        'collate_fn': collate_fn,
+        'num_workers': num_workers,
+        'pin_memory': torch.cuda.is_available(),
+        'prefetch_factor': 2 if num_workers > 0 else None,
+        'persistent_workers': num_workers > 0
+    }
+    
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=True, 
-        collate_fn=collate_fn,
-        num_workers=num_workers,  # Reduced workers
-        pin_memory=torch.cuda.is_available(),  # Enable pinned memory for GPU transfer
-        prefetch_factor=2 if num_workers > 0 else None,  # Only prefetch with workers
-        persistent_workers=num_workers > 0  # Keep workers alive between epochs if using workers
+        batch_size=args.batch_size,
+        shuffle=train_shuffle,
+        sampler=train_sampler,
+        **loader_kwargs
     )
+    
+    # Eval loaders may need different pin_memory setting for large batch sizes
+    eval_loader_kwargs = {
+        **loader_kwargs,
+        'pin_memory': torch.cuda.is_available() and args.eval_batch_size <= 64
+    }
     
     val_loader = DataLoader(
         val_dataset, 
         batch_size=args.eval_batch_size, 
-        shuffle=False, 
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available() and args.eval_batch_size <= 64,
-        prefetch_factor=2 if num_workers > 0 else None,
-        persistent_workers=num_workers > 0  # Keep workers alive if using workers
+        shuffle=False,
+        **eval_loader_kwargs
     )
     
     test_loader = DataLoader(
         test_dataset, 
         batch_size=args.eval_batch_size, 
-        shuffle=False, 
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available() and args.eval_batch_size <= 64,
-        prefetch_factor=2 if num_workers > 0 else None,
-        persistent_workers=num_workers > 0  # Keep workers alive if using workers
+        shuffle=False,
+        **eval_loader_kwargs
     )
     
     print(f"  Using {num_workers} workers for data loading")
@@ -1184,20 +1291,37 @@ def main():
             log_dict[f'val/duration_{bucket}_accuracy'] = perf['accuracy']
             log_dict[f'val/duration_{bucket}_count'] = perf['count']
         
-        # Log top confusion pairs
+        # Create full confusion matrix table sorted by count (most confusions first)
+        cm = val_results['confusion_matrix']
         confusion_table_data = []
-        for true_class, pred_class, rate in val_results['confusion_pairs'][:5]:
-            confusion_table_data.append([
-                label_names[true_class] if true_class < len(label_names) else f"class_{true_class}",
-                label_names[pred_class] if pred_class < len(label_names) else f"class_{pred_class}",
-                f"{rate:.2%}"
-            ])
         
-        if confusion_table_data:
-            log_dict['val/top_confusions'] = wandb.Table(
-                columns=["True Region", "Predicted Region", "Confusion Rate"],
-                data=confusion_table_data
-            )
+        # Collect all confusion pairs with their counts
+        for i in range(len(label_names)):
+            for j in range(len(label_names)):
+                count = int(cm[i, j])
+                if count > 0:  # Only include non-zero entries
+                    true_label = label_names[i] if i < len(label_names) else f"class_{i}"
+                    pred_label = label_names[j] if j < len(label_names) else f"class_{j}"
+                    # Calculate rate as percentage of true class samples
+                    total_true_class = cm[i].sum()
+                    rate = count / total_true_class if total_true_class > 0 else 0
+                    is_correct = (i == j)
+                    confusion_table_data.append([
+                        true_label,
+                        pred_label,
+                        count,
+                        f"{rate:.1%}",
+                        "✓" if is_correct else ""
+                    ])
+        
+        # Sort by count (descending) to show most common confusions first
+        confusion_table_data.sort(key=lambda x: x[2], reverse=True)
+        
+        # Log the full sorted confusion matrix table
+        log_dict['val/confusion_matrix_table'] = wandb.Table(
+            columns=["True Region", "Predicted Region", "Count", "Rate", "Correct"],
+            data=confusion_table_data
+        )
         
         # Add per-region F1 scores
         for class_idx, f1_score in val_results['per_class_f1'].items():
@@ -1286,7 +1410,7 @@ def main():
         os.path.join(args.output_dir, 'confusion_matrix.png')
     )
     
-    # Save final results
+    # Save final results - convert numpy types to native Python types for JSON serialization
     results = {
         'args': vars(args),
         'dataset_info': {
@@ -1295,20 +1419,27 @@ def main():
             'total_samples': metadata['statistics']['total_samples'],
             'label_mapping': label_mapping
         },
-        'best_val_accuracy': best_val_accuracy,
-        'test_accuracy': test_results['accuracy'],
-        'test_top2_accuracy': test_results['top2_accuracy'],
-        'test_top3_accuracy': test_results['top3_accuracy'],
-        'test_speaker_consistency': test_results['speaker_consistency'],
-        'test_loss': test_results['loss'],
-        'test_per_class_f1': test_results['per_class_f1'],
-        'test_per_dataset_accuracy': test_results['per_dataset_accuracy'],
-        'test_per_dataset_f1': test_results['per_dataset_f1'],
-        'test_duration_performance': test_results['duration_performance'],
+        'best_val_accuracy': float(best_val_accuracy),
+        'test_accuracy': float(test_results['accuracy']),
+        'test_top2_accuracy': float(test_results['top2_accuracy']),
+        'test_top3_accuracy': float(test_results['top3_accuracy']),
+        'test_speaker_consistency': float(test_results['speaker_consistency']),
+        'test_loss': float(test_results['loss']),
+        'test_per_class_f1': {int(k): float(v) for k, v in test_results['per_class_f1'].items()},
+        'test_per_dataset_accuracy': {k: float(v) for k, v in test_results['per_dataset_accuracy'].items()},
+        'test_per_dataset_f1': {k: float(v) for k, v in test_results['per_dataset_f1'].items()},
+        'test_duration_performance': {k: {'accuracy': float(v['accuracy']), 'count': int(v['count'])} 
+                                      for k, v in test_results['duration_performance'].items()},
         'test_confusion_pairs': [(label_names[i], label_names[j], float(r)) 
                                  for i, j, r in test_results['confusion_pairs'][:10]],
         'classification_report': report,
-        'learning_curve': learning_curve
+        'learning_curve': {
+            'train_losses': [float(x) for x in learning_curve['train_losses']],
+            'val_losses': [float(x) for x in learning_curve['val_losses']],
+            'val_accuracies': [float(x) for x in learning_curve['val_accuracies']],
+            'val_f1_scores': [float(x) for x in learning_curve['val_f1_scores']],
+            'epochs': [int(x) for x in learning_curve['epochs']]
+        }
     }
     
     with open(os.path.join(args.output_dir, 'results.json'), 'w') as f:

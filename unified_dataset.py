@@ -61,6 +61,10 @@ class UnifiedSample:
     is_validated: bool = True
     quality_score: Optional[float] = None
     
+    # Chunking metadata (for pre-chunked audio)
+    chunk_start_sample: Optional[int] = None
+    chunk_end_sample: Optional[int] = None
+    
     def to_dict(self) -> Dict:
         return asdict(self)
 
