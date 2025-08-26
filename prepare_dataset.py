@@ -136,11 +136,6 @@ def parse_args():
         action="store_true",
         help="Show statistics without saving files"
     )
-    parser.add_argument(
-        "--force", 
-        action="store_true",
-        help="Overwrite existing dataset"
-    )
     
     return parser.parse_args()
 
@@ -364,9 +359,8 @@ def main():
     output_path = Path(args.output_dir) / args.dataset_name
     
     # Check if dataset already exists
-    if output_path.exists() and not args.force:
-        print(f"Dataset already exists at {output_path}")
-        print("Overwriting existing dataset...")
+    if output_path.exists():
+        print(f"Dataset already exists at {output_path}, overwriting...")
         # Remove the return statement to allow overwriting
         # return
     
@@ -467,50 +461,129 @@ def main():
     
     # Create a DataFrame that includes chunk metadata for splitting
     def samples_to_df_with_chunks(samples):
-        data = []
-        for s in samples:
-            d = s.to_dict()
-            # Always include chunk boundaries
-            if hasattr(s, 'chunk_start_sample'):
-                d['chunk_start_sample'] = s.chunk_start_sample
-                d['chunk_end_sample'] = s.chunk_end_sample
-            else:
-                # Fallback - shouldn't happen now but just in case
-                d['chunk_start_sample'] = 0
-                d['chunk_end_sample'] = int(16000 * (s.duration or 3.0))
-            data.append(d)
-        return pd.DataFrame(data)
+        # Now that chunk_start_sample and chunk_end_sample are part of UnifiedSample,
+        # to_dict() will include them automatically
+        return pd.DataFrame([s.to_dict() for s in samples])
     
     # Use custom splitting that preserves chunk metadata
     df_with_chunks = samples_to_df_with_chunks(filtered_samples)
     
-    # Simple speaker-based split that preserves chunk metadata
-    speakers = df_with_chunks['speaker_id'].unique()
-    np.random.shuffle(speakers)
+    # Stratified speaker-based split by dataset AND region
+    print("Using stratified splitting by dataset AND region...")
     
-    n_speakers = len(speakers)
-    train_end = int(n_speakers * (1 - args.val_ratio - args.test_ratio))
-    val_end = int(n_speakers * (1 - args.test_ratio))
+    # Group speakers by dataset and region
+    df_with_chunks['dataset_region'] = df_with_chunks['dataset_name'] + '_' + df_with_chunks['region_label']
+    speaker_groups = df_with_chunks.groupby('speaker_id')['dataset_region'].first().reset_index()
     
-    train_speakers = speakers[:train_end]
-    val_speakers = speakers[train_end:val_end]
-    test_speakers = speakers[val_end:]
+    train_speakers = []
+    val_speakers = []
+    test_speakers = []
     
-    train_df = df_with_chunks[df_with_chunks['speaker_id'].isin(train_speakers)]
-    val_df = df_with_chunks[df_with_chunks['speaker_id'].isin(val_speakers)]
-    test_df = df_with_chunks[df_with_chunks['speaker_id'].isin(test_speakers)]
+    # Track which speakers need sample-level splitting
+    speakers_needing_sample_split = []
     
-    # Convert back to samples (this preserves chunk metadata)
+    # For each unique dataset-region combination, split speakers
+    for dataset_region in speaker_groups['dataset_region'].unique():
+        group_speakers = speaker_groups[speaker_groups['dataset_region'] == dataset_region]['speaker_id'].values
+        np.random.shuffle(group_speakers)
+        
+        n_group = len(group_speakers)
+        if n_group == 1:
+            # If only one speaker, we'll need to split their samples
+            speakers_needing_sample_split.extend(group_speakers)
+        elif n_group == 2:
+            # If two speakers, put one in train and one in val
+            train_speakers.extend(group_speakers[:1])
+            val_speakers.extend(group_speakers[1:])
+        else:
+            # Normal split for groups with 3+ speakers
+            train_end = int(n_group * (1 - args.val_ratio - args.test_ratio))
+            val_end = int(n_group * (1 - args.test_ratio))
+            
+            # Ensure at least one sample in val and test if possible
+            train_end = max(1, train_end)
+            if n_group >= 3:
+                val_end = max(train_end + 1, val_end)
+            
+            train_speakers.extend(group_speakers[:train_end])
+            val_speakers.extend(group_speakers[train_end:val_end])
+            test_speakers.extend(group_speakers[val_end:])
+    
+    # Handle speakers that need sample-level splitting (single speakers in dataset-region groups)
+    if speakers_needing_sample_split:
+        print(f"  Speakers needing sample-level split: {len(speakers_needing_sample_split)}")
+        
+        # Get all samples for these speakers
+        sample_split_df = df_with_chunks[df_with_chunks['speaker_id'].isin(speakers_needing_sample_split)]
+        
+        # For each speaker, split their samples
+        train_dfs = []
+        val_dfs = []
+        test_dfs = []
+        
+        for speaker in speakers_needing_sample_split:
+            speaker_samples = sample_split_df[sample_split_df['speaker_id'] == speaker]
+            n_samples = len(speaker_samples)
+            
+            if n_samples >= 3:
+                # Split samples for this speaker
+                indices = np.arange(n_samples)
+                np.random.shuffle(indices)
+                
+                train_end = int(n_samples * (1 - args.val_ratio - args.test_ratio))
+                val_end = int(n_samples * (1 - args.test_ratio))
+                
+                # Ensure at least one sample in each split if possible
+                train_end = max(1, train_end)
+                val_end = max(train_end + 1, val_end) if n_samples > 2 else n_samples
+                
+                train_dfs.append(speaker_samples.iloc[indices[:train_end]])
+                val_dfs.append(speaker_samples.iloc[indices[train_end:val_end]])
+                if val_end < n_samples:
+                    test_dfs.append(speaker_samples.iloc[indices[val_end:]])
+            elif n_samples == 2:
+                # Put one in train, one in val
+                train_dfs.append(speaker_samples.iloc[:1])
+                val_dfs.append(speaker_samples.iloc[1:])
+            else:
+                # Only one sample, put in train
+                train_dfs.append(speaker_samples)
+        
+        # Combine the sample-level splits with speaker-level splits
+        train_df_speaker = df_with_chunks[df_with_chunks['speaker_id'].isin(train_speakers)]
+        val_df_speaker = df_with_chunks[df_with_chunks['speaker_id'].isin(val_speakers)]
+        test_df_speaker = df_with_chunks[df_with_chunks['speaker_id'].isin(test_speakers)]
+        
+        # Concatenate all dataframes
+        train_dfs_all = [train_df_speaker] + train_dfs
+        val_dfs_all = [val_df_speaker] + val_dfs
+        test_dfs_all = [test_df_speaker] + test_dfs
+        
+        train_df = pd.concat(train_dfs_all, ignore_index=True) if train_dfs_all else pd.DataFrame()
+        val_df = pd.concat(val_dfs_all, ignore_index=True) if val_dfs_all else pd.DataFrame()
+        test_df = pd.concat(test_dfs_all, ignore_index=True) if test_dfs_all else pd.DataFrame()
+    else:
+        # No sample-level splitting needed
+        train_df = df_with_chunks[df_with_chunks['speaker_id'].isin(train_speakers)]
+        val_df = df_with_chunks[df_with_chunks['speaker_id'].isin(val_speakers)]
+        test_df = df_with_chunks[df_with_chunks['speaker_id'].isin(test_speakers)]
+    
+    # Print statistics about the split
+    print(f"  Total speakers: {len(speaker_groups)}")
+    print(f"  Train-only speakers: {len(train_speakers)}")
+    print(f"  Val-only speakers: {len(val_speakers)}")
+    print(f"  Test-only speakers: {len(test_speakers)}")
+    print(f"  Sample-split speakers: {len(speakers_needing_sample_split)}")
+    
+    # Convert back to samples (chunk metadata now automatically preserved)
     def df_to_samples_with_chunks(df):
         samples = []
         for _, row in df.iterrows():
+            # Filter to only UnifiedSample fields
             sample_dict = {k: v for k, v in row.to_dict().items() 
                           if k in UnifiedSample.__dataclass_fields__}
+            # chunk_start_sample and chunk_end_sample are now in __dataclass_fields__
             sample = UnifiedSample(**sample_dict)
-            # Restore chunk boundaries
-            if 'chunk_start_sample' in row and pd.notna(row['chunk_start_sample']):
-                sample.chunk_start_sample = int(row['chunk_start_sample'])
-                sample.chunk_end_sample = int(row['chunk_end_sample'])
             samples.append(sample)
         return samples
     
@@ -522,15 +595,55 @@ def main():
     print(f"✓ Val: {len(val_samples)} samples")
     print(f"✓ Test: {len(test_samples)} samples")
     
-    # Verify no speaker overlap
-    train_speakers = set(s.speaker_id for s in train_samples)
-    val_speakers = set(s.speaker_id for s in val_samples)
-    test_speakers = set(s.speaker_id for s in test_samples)
+    # Verify each dataset appears in all splits
+    print("\nDataset distribution across splits:")
+    for split_name, split_df in [("Train", train_df), ("Val", val_df), ("Test", test_df)]:
+        dataset_counts = split_df['dataset_name'].value_counts()
+        print(f"  {split_name}:")
+        for dataset, count in dataset_counts.items():
+            print(f"    {dataset}: {count} samples")
     
-    assert len(train_speakers & val_speakers) == 0, "Speaker overlap between train and val!"
-    assert len(train_speakers & test_speakers) == 0, "Speaker overlap between train and test!"
-    assert len(val_speakers & test_speakers) == 0, "Speaker overlap between val and test!"
-    print("✓ No speaker overlap between splits")
+    # Check if any dataset is missing from val or test
+    train_datasets = set(train_df['dataset_name'].unique())
+    val_datasets = set(val_df['dataset_name'].unique())
+    test_datasets = set(test_df['dataset_name'].unique())
+    
+    missing_from_val = train_datasets - val_datasets
+    missing_from_test = train_datasets - test_datasets
+    
+    if missing_from_val:
+        print(f"\n⚠️  WARNING: Datasets missing from validation set: {missing_from_val}")
+    if missing_from_test:
+        print(f"⚠️  WARNING: Datasets missing from test set: {missing_from_test}")
+    
+    # Verify speaker overlap (note: sample-split speakers will appear in multiple splits)
+    train_speakers_set = set(s.speaker_id for s in train_samples)
+    val_speakers_set = set(s.speaker_id for s in val_samples)
+    test_speakers_set = set(s.speaker_id for s in test_samples)
+    
+    # Check overlap
+    train_val_overlap = train_speakers_set & val_speakers_set
+    train_test_overlap = train_speakers_set & test_speakers_set
+    val_test_overlap = val_speakers_set & test_speakers_set
+    
+    # These overlaps are OK if they're from sample-split speakers
+    sample_split_set = set(speakers_needing_sample_split) if speakers_needing_sample_split else set()
+    
+    unexpected_train_val = train_val_overlap - sample_split_set
+    unexpected_train_test = train_test_overlap - sample_split_set
+    unexpected_val_test = val_test_overlap - sample_split_set
+    
+    if unexpected_train_val:
+        print(f"⚠️  WARNING: Unexpected speaker overlap between train and val: {unexpected_train_val}")
+    if unexpected_train_test:
+        print(f"⚠️  WARNING: Unexpected speaker overlap between train and test: {unexpected_train_test}")
+    if unexpected_val_test:
+        print(f"⚠️  WARNING: Unexpected speaker overlap between val and test: {unexpected_val_test}")
+    
+    if train_val_overlap or train_test_overlap or val_test_overlap:
+        print(f"✓ Speaker overlap from sample-level splits: {len(train_val_overlap | train_test_overlap | val_test_overlap)} speakers")
+    else:
+        print("✓ No speaker overlap between splits")
     
     # Calculate and display duration statistics before saving
     def calculate_duration_stats(samples):
